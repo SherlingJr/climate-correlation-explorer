@@ -1,40 +1,53 @@
 """
 ingest_noaa_county_climate.py
 
-Pulls monthly county-level temperature/precipitation data from NOAA's
-EpiNOAA product (derived from nClimGrid-daily, aggregated to county FIPS)
-and loads it into a raw Postgres table on Railway.
+Pulls county-level temperature/precipitation data from NOAA's
+nClimGrid-Daily product (area averages, county scale) and loads a
+monthly aggregate into a raw Postgres table on Railway.
 
-Why EpiNOAA instead of GSOD or the legacy nClimDiv "county" files:
+REVISION NOTE: an earlier version of this script pointed at a guessed S3
+path (s3://noaa-nclimgrid-daily-pds/EpiNOAA/csv/) based on a JS-rendered
+bucket browser page that couldn't actually be verified. Discover mode
+correctly caught that it was wrong (0 objects found). This version is
+built from NOAA's own nClimGrid-Daily v1.0.0 User Guide, which documents
+the real file naming convention directly - see the source note below.
+
+Why nClimGrid-Daily's county area-averages, not GSOD or legacy nClimDiv:
 - GSOD is station-level. To get a county value you'd have to pick/interpolate
   stations yourself, and station coverage is uneven across counties.
 - The legacy nClimDiv "county" files (climdiv-tmpccy-*) duplicate the same
-  climate-division value across every county inside that division, so
-  neighboring counties in the same division show identical numbers - not
+  climate-division value across every county inside that division - not
   real per-county resolution.
-- EpiNOAA is the nClimGrid grid (real spatial interpolation from GHCN-D
-  stations) pre-aggregated to actual county polygons. It's already keyed by
-  FIPS, covers 1951-present (so it comfortably covers 2004+), is public/free
-  with no API key or rate limit (flat files on S3, unsigned requests), and
-  is updated monthly. That means int_county_fips_reference and any
-  station-to-county harmonization step you sketched for climate specifically
-  can be dropped - the join key is already FIPS.
+- nClimGrid-Daily's county area-averages are the grid (real spatial
+  interpolation from GHCN-D stations) pre-aggregated to actual county
+  polygons - real per-county values. Public, free, no API key, covers
+  1951-present, updated every 3 days. Already keyed by FIPS.
 
-Source bucket: s3://noaa-nclimgrid-daily-pds/EpiNOAA/csv/
-(AWS Open Data Registry, unsigned/no-account access)
+Source (NOAA nClimGrid-Daily User Guide, section 3b - filenames):
+  Web-accessible folder: https://www.ncei.noaa.gov/data/nclimgrid-daily/access/averages/{YYYY}/
+  Filename pattern:      {var}-{YYYYMM}-cty-{status}.csv
+    var    = tmax | tmin | tavg | prcp
+    status = scaled (final, appears ~3 months after the fact)
+           | prelim (recent months, before QC scaling)
+  One file per variable per month - NOT one combined file. Each file has
+  one row per county with a value per day of that month (this is a DAILY
+  product), so this script averages (temp) / sums (precip) across the
+  days present to get the monthly number our schema stores.
 
 IMPORTANT - run this once before wiring up cron:
     python ingest_noaa_county_climate.py --discover
-This lists the actual objects under the EpiNOAA/csv/ prefix and prints the
-header row of one file. NOAA's exact file naming and column names for this
-product have shifted before between "cty"/"cte" and header casing, so the
-column-detection below is written to match by *keyword*, not by hardcoded
-position - but confirm it against real output before your first backfill.
+This downloads one recent month's tavg county file and prints its real
+columns so you can confirm the day-column detection below actually
+matches before trusting a full backfill. I have NOT been able to fetch
+this file myself to verify its exact internal column names (NOAA's
+documentation confirms the URL/filename pattern but not the CSV header
+row) - the wide/long parsing below handles the two most common shapes,
+but --discover is what tells us which one this actually is.
 
 Usage:
     python ingest_noaa_county_climate.py --discover
-    python ingest_noaa_county_climate.py --start-year 2004 --end-year 2026
-    python ingest_noaa_county_climate.py --start-year 2026 --end-year 2026 --start-month 9  # incremental / cron run
+    python ingest_noaa_county_climate.py --start-year 1991 --end-year 2026
+    python ingest_noaa_county_climate.py --start-year 2026 --end-year 2026  # incremental / cron run
 """
 
 import argparse
@@ -44,11 +57,9 @@ import os
 import sys
 from datetime import date
 
-import boto3
 import pandas as pd
 import psycopg2
-from botocore import UNSIGNED
-from botocore.config import Config
+import requests
 from psycopg2.extras import execute_values
 
 logging.basicConfig(
@@ -58,48 +69,30 @@ logging.basicConfig(
 )
 log = logging.getLogger("noaa_ingest")
 
-BUCKET = "noaa-nclimgrid-daily-pds"
-PREFIX = "EpiNOAA/csv/"
+BASE_URL = "https://www.ncei.noaa.gov/data/nclimgrid-daily/access/averages"
+VARIABLES = ["tmax", "tmin", "tavg", "prcp"]
+STATUSES = ["scaled", "prelim"]  # try scaled (final) first, fall back to prelim
 
-# Candidate substrings used to identify each field regardless of exact
-# header spelling/casing the source file uses.
-COLUMN_HINTS = {
-    "fips": ["fips"],
-    "year": ["year"],
-    "month": ["month"],
-    "tmax": ["tmax"],
-    "tmin": ["tmin"],
-    "tavg": ["tavg", "avg_temp", "avgtemp"],
-    "prcp": ["prcp", "precip"],
-}
+FIPS_HINTS = ["fips", "geoid", "county_fips", "cty_fips"]
+ID_HINTS = FIPS_HINTS + ["region", "id"]
 
 
-def get_s3_client():
-    # Public bucket - explicitly unsigned, no AWS credentials needed/used.
-    return boto3.client("s3", config=Config(signature_version=UNSIGNED))
+def _file_url(var: str, year: int, month: int, status: str) -> str:
+    yyyymm = f"{year}{month:02d}"
+    return f"{BASE_URL}/{year}/{var}-{yyyymm}-cty-{status}.csv"
 
 
-def discover(limit: int = 40) -> None:
-    """List objects under the EpiNOAA/csv/ prefix and preview one file's
-    header so you can confirm naming/columns before the first real run."""
-    s3 = get_s3_client()
-    resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=PREFIX, MaxKeys=limit)
-    keys = [obj["Key"] for obj in resp.get("Contents", [])]
-    if not keys:
-        log.error("No objects found under s3://%s/%s - check the prefix, "
-                   "NOAA may have reorganized the bucket.", BUCKET, PREFIX)
-        return
-    log.info("Found %d objects (showing up to %d):", resp.get("KeyCount", 0), limit)
-    for k in keys:
-        print(f"  {k}")
-
-    county_keys = [k for k in keys if "cty" in k.lower() or "cte" in k.lower() or "county" in k.lower()]
-    sample_key = county_keys[0] if county_keys else keys[0]
-    log.info("Previewing header of: %s", sample_key)
-    obj = s3.get_object(Bucket=BUCKET, Key=sample_key)
-    df = pd.read_csv(io.BytesIO(obj["Body"].read()), nrows=5)
-    print(df.columns.tolist())
-    print(df.head())
+def _fetch_csv(var: str, year: int, month: int) -> tuple[pd.DataFrame, str] | None:
+    """Try scaled first, then prelim. Returns (dataframe, url) or None if
+    neither status exists yet for this year-month (e.g. too far in the future)."""
+    for status in STATUSES:
+        url = _file_url(var, year, month, status)
+        resp = requests.get(url, timeout=60)
+        if resp.status_code == 200:
+            return pd.read_csv(io.BytesIO(resp.content)), url
+        if resp.status_code != 404:
+            resp.raise_for_status()
+    return None
 
 
 def _find_column(columns, hints) -> str | None:
@@ -111,73 +104,94 @@ def _find_column(columns, hints) -> str | None:
     return None
 
 
-def _list_county_monthly_keys(s3, start_year: int, end_year: int) -> list[str]:
-    """List monthly county-level CSV keys within the year range.
-    Paginates since the prefix holds many objects across all years/regions."""
-    keys = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            lower = key.lower()
-            if not lower.endswith(".csv"):
-                continue
-            if "cty" not in lower and "cte" not in lower and "county" not in lower:
-                continue
-            # Expect a YYYYMM somewhere in the filename; filter by year range.
-            digits = "".join(ch if ch.isdigit() else " " for ch in key).split()
-            year_hit = any(
-                len(tok) >= 6 and start_year <= int(tok[:4]) <= end_year
-                for tok in digits
-            )
-            if year_hit:
-                keys.append(key)
-    return keys
+def discover(year: int | None = None, month: int | None = None) -> None:
+    """Download one real file and print its shape/columns so we can
+    confirm the parsing logic before trusting a full backfill."""
+    today = date.today()
+    if year is None or month is None:
+        # Default to 2 months ago - recent enough to exist, old enough to
+        # likely have moved past "file not published yet".
+        probe = today.month - 2
+        year = today.year if probe > 0 else today.year - 1
+        month = probe if probe > 0 else probe + 12
+
+    log.info("Probing tavg for %d-%02d ...", year, month)
+    result = _fetch_csv("tavg", year, month)
+    if result is None:
+        log.error("Got 404 for both scaled and prelim at %d-%02d. Tried:\n  %s\n  %s",
+                   year, month, _file_url("tavg", year, month, "scaled"),
+                   _file_url("tavg", year, month, "prelim"))
+        return
+
+    df, url = result
+    log.info("Fetched: %s", url)
+    log.info("Shape: %s", df.shape)
+    print("Columns:", df.columns.tolist())
+    print(df.head())
 
 
-def _parse_county_csv(s3, key: str) -> pd.DataFrame:
-    obj = s3.get_object(Bucket=BUCKET, Key=key)
-    df = pd.read_csv(io.BytesIO(obj["Body"].read()))
+def _aggregate_month(df: pd.DataFrame, var: str) -> pd.DataFrame:
+    """Collapse one county-by-day dataframe down to one value per county
+    for the month. Handles two possible shapes:
+      - wide: one row per county, one column per day (e.g. '1'..'31')
+      - long: one row per county-day, with a date/day column + a value column
+    Temperature variables are averaged across days; precipitation is summed.
+    """
+    id_col = _find_column(df.columns, ID_HINTS)
+    if not id_col:
+        raise ValueError(f"Could not find a county identifier column in {list(df.columns)}")
 
-    fips_col = _find_column(df.columns, COLUMN_HINTS["fips"])
-    tmax_col = _find_column(df.columns, COLUMN_HINTS["tmax"])
-    tmin_col = _find_column(df.columns, COLUMN_HINTS["tmin"])
-    tavg_col = _find_column(df.columns, COLUMN_HINTS["tavg"])
-    prcp_col = _find_column(df.columns, COLUMN_HINTS["prcp"])
-    year_col = _find_column(df.columns, COLUMN_HINTS["year"])
-    month_col = _find_column(df.columns, COLUMN_HINTS["month"])
+    day_cols = [c for c in df.columns if str(c).strip().isdigit()]
+    agg_func = "sum" if var == "prcp" else "mean"
 
-    if not fips_col:
-        raise ValueError(f"{key}: could not find a FIPS column in {list(df.columns)}")
+    if day_cols:
+        # Wide format: average/sum across the day-of-month columns.
+        values = df[day_cols].apply(pd.to_numeric, errors="coerce")
+        monthly = values.mean(axis=1) if agg_func == "mean" else values.sum(axis=1, min_count=1)
+        out = pd.DataFrame({"fips_code": df[id_col].astype(str).str.zfill(5), var: monthly})
+        return out
 
-    out = pd.DataFrame()
-    out["fips_code"] = df[fips_col].astype(str).str.zfill(5)
+    # Long format: group by county id and aggregate the value column.
+    value_col = _find_column(df.columns, ["value", var])
+    if not value_col:
+        raise ValueError(f"Could not find a value column in {list(df.columns)} for {var}")
+    grouped = (
+        df.assign(fips_code=df[id_col].astype(str).str.zfill(5))
+        .groupby("fips_code")[value_col]
+        .agg(agg_func)
+        .reset_index()
+        .rename(columns={value_col: var})
+    )
+    return grouped
 
-    if year_col and month_col:
-        out["period_year"] = df[year_col].astype(int)
-        out["period_month"] = df[month_col].astype(int)
-    else:
-        # Some EpiNOAA exports encode the period in a single date-like column
-        # or in the filename (YYYYMM) instead of separate year/month columns.
-        date_col = _find_column(df.columns, ["date", "period"])
-        if date_col:
-            parsed = pd.to_datetime(df[date_col])
-            out["period_year"] = parsed.dt.year
-            out["period_month"] = parsed.dt.month
-        else:
-            digits = "".join(ch if ch.isdigit() else " " for ch in key).split()
-            yyyymm = next((t for t in digits if len(t) == 6), None)
-            if not yyyymm:
-                raise ValueError(f"{key}: no year/month column and none found in filename")
-            out["period_year"] = int(yyyymm[:4])
-            out["period_month"] = int(yyyymm[4:6])
 
-    out["tmax_f"] = df[tmax_col] if tmax_col else None
-    out["tmin_f"] = df[tmin_col] if tmin_col else None
-    out["tavg_f"] = df[tavg_col] if tavg_col else None
-    out["prcp_in"] = df[prcp_col] if prcp_col else None
-    out["source_file"] = key
-    return out
+def fetch_month(year: int, month: int) -> pd.DataFrame | None:
+    """Fetch all four variables for one year-month and join into one
+    row-per-county dataframe."""
+    merged: pd.DataFrame | None = None
+    sources = []
+    for var in VARIABLES:
+        result = _fetch_csv(var, year, month)
+        if result is None:
+            log.warning("%d-%02d: no file for %s (may not be published yet)", year, month, var)
+            continue
+        raw_df, url = result
+        sources.append(url)
+        agg = _aggregate_month(raw_df, var)
+        merged = agg if merged is None else merged.merge(agg, on="fips_code", how="outer")
+
+    if merged is None:
+        return None
+
+    for var in VARIABLES:
+        if var not in merged.columns:
+            merged[var] = None
+
+    merged = merged.rename(columns={"tmax": "tmax_f", "tmin": "tmin_f", "tavg": "tavg_f", "prcp": "prcp_in"})
+    merged["period_year"] = year
+    merged["period_month"] = month
+    merged["source_file"] = ";".join(sources)
+    return merged
 
 
 UPSERT_SQL = """
@@ -213,37 +227,36 @@ def load_to_postgres(df: pd.DataFrame, dsn: str) -> int:
 
 
 def run(start_year: int, end_year: int, dsn: str) -> None:
-    s3 = get_s3_client()
-    keys = _list_county_monthly_keys(s3, start_year, end_year)
-    log.info("Found %d county monthly files for %d-%d", len(keys), start_year, end_year)
-    if not keys:
-        log.warning("Nothing to load - run --discover to check the bucket layout.")
-        return
-
     total_rows = 0
-    for i, key in enumerate(keys, 1):
-        try:
-            df = _parse_county_csv(s3, key)
+    total_months = 0
+    today = date.today()
+    for year in range(start_year, end_year + 1):
+        for month in range(1, 13):
+            if year == today.year and month > today.month:
+                continue  # don't request months that haven't happened yet
+            df = fetch_month(year, month)
+            if df is None:
+                log.warning("%d-%02d: nothing fetched for any variable, skipping", year, month)
+                continue
             n = load_to_postgres(df, dsn)
             total_rows += n
-            log.info("[%d/%d] %s -> %d rows", i, len(keys), key, n)
-        except Exception:
-            log.exception("Failed on %s - skipping, continuing with remaining files", key)
-    log.info("Done. %d total rows upserted.", total_rows)
+            total_months += 1
+            log.info("%d-%02d -> %d county rows", year, month, n)
+    log.info("Done. %d months processed, %d total rows upserted.", total_months, total_rows)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--discover", action="store_true",
-                         help="List bucket contents and preview a file's columns, then exit.")
+                         help="Fetch one real file and print its columns, then exit.")
+    parser.add_argument("--discover-year", type=int, default=None)
+    parser.add_argument("--discover-month", type=int, default=None)
     parser.add_argument("--start-year", type=int, default=2004)
     parser.add_argument("--end-year", type=int, default=date.today().year)
-    parser.add_argument("--start-month", type=int, default=1,
-                         help="Reserved for future month-level filtering; year-level filtering is used for now.")
     args = parser.parse_args()
 
     if args.discover:
-        discover()
+        discover(args.discover_year, args.discover_month)
         return
 
     dsn = os.environ.get("DATABASE_URL")
