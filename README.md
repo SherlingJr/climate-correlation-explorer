@@ -117,7 +117,11 @@ reasoning is also inline as a comment in `sql/schema_raw.sql`.
    exposes these individually), plus `DBT_PROFILES_DIR=.`. For the first run,
    manually trigger it (Railway dashboard "Run now" or `railway run dbt run`
    via the CLI) rather than waiting for the cron schedule, so you're not
-   waiting a month to see `marts.mart_climate_trends` populate.
+   waiting a month to see `analytics_marts.mart_climate_trends` populate.
+   (Note: dbt prefixes the configured `marts` schema with the profile's
+   default `analytics` schema, so the real table lives in
+   `analytics_marts`, not a bare `marts` schema - the API queries the
+   correct one.)
 4. **`api/` service**: set Root Directory to `api`, add env var
    `DATABASE_URL`. This one's a normal web service (`ON_FAILURE` restart),
    not a cron job. Once it's up, its public Railway URL serves both
