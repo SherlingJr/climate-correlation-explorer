@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>US Climate Correlation Explorer</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; background: #0e1117; color: #e6e6e6; }
+  header { padding: 1rem 1.5rem; }
+  header h1 { margin: 0 0 0.25rem; font-size: 1.3rem; }
+  header p { margin: 0; color: #9aa0a6; font-size: 0.9rem; }
+  #controls { padding: 0 1.5rem 0.5rem; display: flex; align-items: center; gap: 1rem; }
+  /* Fixed height, not 80vh - inside a WordPress iframe "viewport height"
+     means the iframe's own height, which we're about to set from the
+     parent page, so 80vh would reference itself and never settle. */
+  #map { width: 100%; height: 640px; }
+  #month-label { min-width: 6rem; font-variant-numeric: tabular-nums; }
+  #play-btn { cursor: pointer; }
+  .note { padding: 0.5rem 1.5rem 1rem; color: #9aa0a6; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>US Climate Correlation Explorer</h1>
+  <p>County-level temperature anomaly vs. a 1991&ndash;2020 baseline. Gray = no data for that county/month.</p>
+</header>
+<div id="controls">
+  <button id="play-btn">&#9654; Play</button>
+  <input id="month-slider" type="range" min="0" max="0" value="0" style="flex:1" />
+  <span id="month-label">--</span>
+</div>
+<div id="map"></div>
+<p class="note">
+  Correlation &ne; causation. Overlay datasets (crop yields, mortality, crime) will appear in the
+  selector here once Phase 2/3 land.
+</p>
+
+<script>
+const START_YEAR = 2004;
+const END_YEAR = new Date().getFullYear();
+const MONTHS = [];
+for (let y = START_YEAR; y <= END_YEAR; y++) {
+  for (let m = 1; m <= 12; m++) MONTHS.push([y, m]);
+}
+
+const slider = document.getElementById("month-slider");
+const label = document.getElementById("month-label");
+const playBtn = document.getElementById("play-btn");
+slider.max = MONTHS.length - 1;
+
+let geojson = null;
+const frameCache = new Map(); // "year-month" -> {fips: [...], anomaly: [...], hover: [...]}
+let playing = false;
+let playTimer = null;
+
+async function loadGeojson() {
+  // Plotly's maintained public US county boundary geojson, keyed by 5-digit FIPS.
+  const resp = await fetch("https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json");
+  geojson = await resp.json();
+}
+
+async function loadFrame(year, month) {
+  const key = `${year}-${month}`;
+  if (frameCache.has(key)) return frameCache.get(key);
+  const resp = await fetch(`/api/climate/map/${year}/${month}`);
+  const data = await resp.json();
+  const fips = [], anomaly = [], hover = [];
+  for (const c of data.counties) {
+    fips.push(c.fips_code);
+    anomaly.push(c.has_data_gap ? null : c.anomaly_f);
+    hover.push(`${c.county_name || c.fips_code}, ${c.state_abbr || ""}<br>Anomaly: ${
+      c.has_data_gap ? "no data" : c.anomaly_f.toFixed(1) + "\u00b0F"
+    }`);
+  }
+  const frame = { fips, anomaly, hover };
+  frameCache.set(key, frame);
+  return frame;
+}
+
+async function renderFrame(index) {
+  const [year, month] = MONTHS[index];
+  label.textContent = `${year}-${String(month).padStart(2, "0")}`;
+  const frame = await loadFrame(year, month);
+
+  const trace = {
+    type: "choropleth",
+    geojson,
+    locations: frame.fips,
+    z: frame.anomaly,
+    featureidkey: "id",
+    colorscale: "RdBu",
+    reversescale: true,
+    zmid: 0,
+    zmin: -6,
+    zmax: 6,
+    marker: { line: { width: 0.3, color: "#333" } },
+    text: frame.hover,
+    hoverinfo: "text",
+    colorbar: { title: "\u00b0F anomaly" },
+  };
+
+  const layout = {
+    geo: { scope: "usa", bgcolor: "rgba(0,0,0,0)" },
+    paper_bgcolor: "#0e1117",
+    plot_bgcolor: "#0e1117",
+    font: { color: "#e6e6e6" },
+    margin: { t: 10, b: 10, l: 10, r: 10 },
+  };
+
+  Plotly.react("map", [trace], layout, { responsive: true, displayModeBar: false });
+}
+
+slider.addEventListener("input", (e) => renderFrame(Number(e.target.value)));
+
+playBtn.addEventListener("click", () => {
+  playing = !playing;
+  playBtn.innerHTML = playing ? "&#10074;&#10074; Pause" : "&#9654; Play";
+  if (playing) {
+    playTimer = setInterval(() => {
+      let next = Number(slider.value) + 1;
+      if (next > Number(slider.max)) next = 0;
+      slider.value = next;
+      renderFrame(next);
+    }, 350);
+  } else {
+    clearInterval(playTimer);
+  }
+});
+
+(async function init() {
+  await loadGeojson();
+  await renderFrame(MONTHS.length - 1); // start on the most recent month
+  slider.value = MONTHS.length - 1;
+})();
+
+// --- WordPress iframe auto-resize ---
+// This app doesn't know its own embedded height ahead of time (WordPress
+// column widths vary by theme), so instead of guessing a fixed iframe
+// height on the WordPress side, this page reports its real content height
+// to whichever page embeds it, and the parent resizes the iframe to match.
+// See the matching listener snippet in the deploy README's WordPress section.
+function reportHeight() {
+  const height = document.documentElement.scrollHeight;
+  window.parent.postMessage({ type: "climate-explorer-resize", height }, "*");
+}
+window.addEventListener("load", reportHeight);
+window.addEventListener("resize", reportHeight);
+new ResizeObserver(reportHeight).observe(document.body);
+</script>
+</body>
+</html>

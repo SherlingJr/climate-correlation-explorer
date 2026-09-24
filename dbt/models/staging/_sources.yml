@@ -1,0 +1,48 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: noaa_county_climate_monthly
+        description: Monthly county-level temp/precip from NOAA EpiNOAA, loaded by ingest_noaa_county_climate.py
+        columns:
+          - name: fips_code
+            tests:
+              - not_null
+          - name: period_year
+            tests:
+              - not_null
+          - name: period_month
+            tests:
+              - not_null
+      - name: county_fips_reference
+        description: Canonical US county list from Census TIGER/Line gazetteer
+
+models:
+  - name: stg_noaa_climate_county
+    columns:
+      - name: fips_code
+        tests:
+          - not_null
+      - name: period_date
+        tests:
+          - not_null
+
+  - name: int_climate_anomaly_by_county
+    columns:
+      - name: fips_code
+        tests:
+          - not_null
+
+  - name: mart_climate_trends
+    columns:
+      - name: fips_code
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - fips_code
+            - period_year
+            - period_month

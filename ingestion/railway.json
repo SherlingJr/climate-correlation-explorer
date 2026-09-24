@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python ingest_noaa_county_climate.py --start-year $(date +%Y) --end-year $(date +%Y)",
+    "cronSchedule": "0 6 3 * *",
+    "restartPolicyType": "NEVER"
+  }
+}

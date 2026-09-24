@@ -1,0 +1,19 @@
+# Committed to the repo intentionally - it has no secrets in it, only
+# env_var() references. Railway's Postgres plugin exposes PGHOST, PGPORT,
+# PGUSER, PGPASSWORD, PGDATABASE individually (in addition to the combined
+# DATABASE_URL), which is what dbt-postgres needs here.
+#
+# Point dbt at this file with: DBT_PROFILES_DIR=./dbt  (relative to repo root)
+
+climate_explorer:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('PGHOST') }}"
+      port: "{{ env_var('PGPORT', '5432') | as_number }}"
+      user: "{{ env_var('PGUSER') }}"
+      password: "{{ env_var('PGPASSWORD') }}"
+      dbname: "{{ env_var('PGDATABASE') }}"
+      schema: analytics
+      threads: 4
