@@ -14,8 +14,7 @@ def county_time_series(fips: str, start_year: int = 2004, end_year: int = 2026):
             """
             select period_year, period_month, tavg_f, tmax_f, tmin_f, prcp_in,
                    anomaly_f, has_data_gap
-            from marts.mart_climate_trends
-            where fips_code = %s
+            from analytics_marts.mart_climate_trends
               and period_year between %s and %s
             order by period_year, period_month
             """,
@@ -37,8 +36,7 @@ def national_snapshot(year: int, month: int):
         cur.execute(
             """
             select fips_code, county_name, state_abbr, tavg_f, anomaly_f, has_data_gap
-            from marts.mart_climate_trends
-            where period_year = %s and period_month = %s
+            from analytics_marts.mart_climate_trends
             """,
             (year, month),
         )
