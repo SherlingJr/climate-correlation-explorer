@@ -35,5 +35,9 @@ app.include_router(climate_router)
 # fewer service to deploy and keep in sync while the milestone is just
 # "get a live heatmap up." Split it out once the frontend grows past a
 # single page or you want it on a different domain.
-frontend_dir = Path(__file__).parent.parent / "frontend"
+# frontend/ lives inside api/ (not as a repo-root sibling) specifically
+# because Railway's Root Directory setting for this service is "api" -
+# the container only ever sees what's inside that folder, so a sibling
+# directory at the repo root is invisible to it.
+frontend_dir = Path(__file__).parent / "frontend"
 app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")

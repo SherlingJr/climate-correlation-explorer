@@ -66,9 +66,10 @@ climate-explorer/
 │   ├── db.py
 │   ├── routers/climate.py
 │   ├── requirements.txt
-│   └── railway.json
-├── frontend/            (not its own Railway service - see below)
-│   └── index.html         (Plotly.js choropleth + time slider)
+│   ├── railway.json
+│   └── frontend/          (must live INSIDE api/, not as a repo-root
+│       └── index.html      sibling - Root Directory scoping means a
+│                            sibling folder is invisible to this service)
 └── sql/
     └── schema_raw.sql    (run once by hand, not a Railway service)
 ```
@@ -170,7 +171,7 @@ the whole app inside its own origin so nothing needs to change.
    </script>
    ```
    The frontend already posts its content height on load/resize (see the
-   `reportHeight()` script at the bottom of `frontend/index.html`), so the
+   `reportHeight()` script at the bottom of `api/frontend/index.html`), so the
    iframe grows/shrinks to fit instead of you having to guess a fixed
    height per theme/column width.
 3. **Column width.** A US county choropleth is dense - most WordPress theme
