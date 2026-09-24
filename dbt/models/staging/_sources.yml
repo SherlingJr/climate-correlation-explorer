@@ -42,8 +42,7 @@ models:
           - not_null
     tests:
       - dbt_utils.unique_combination_of_columns:
-          arguments:
-            combination_of_columns:
-              - fips_code
-              - period_year
-              - period_month
+          combination_of_columns:
+            - fips_code
+            - period_year
+            - period_month
