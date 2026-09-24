@@ -34,15 +34,22 @@ Source (NOAA nClimGrid-Daily User Guide, section 3b - filenames):
   product), so this script averages (temp) / sums (precip) across the
   days present to get the monthly number our schema stores.
 
-IMPORTANT - run this once before wiring up cron:
-    python ingest_noaa_county_climate.py --discover
-This downloads one recent month's tavg county file and prints its real
-columns so you can confirm the day-column detection below actually
-matches before trusting a full backfill. I have NOT been able to fetch
-this file myself to verify its exact internal column names (NOAA's
-documentation confirms the URL/filename pattern but not the CSV header
-row) - the wide/long parsing below handles the two most common shapes,
-but --discover is what tells us which one this actually is.
+IMPORTANT - confirmed via --discover against a real file (tavg, 2026-07):
+this file has NO header row - it's a fixed positional layout:
+  col 0:  region type ('cty')
+  col 1:  county FIPS code (must be read as text - reading as a number
+          drops the leading zero on FIPS 01000-09999)
+  col 2:  "ST: County Name" (state postal abbreviation + county name)
+  col 3:  year
+  col 4:  month
+  col 5:  variable name ('TAVG'/'TMAX'/'TMIN'/'PRCP')
+  cols 6-36: one column per day of the month (up to 31), values are
+          right-padded with leading spaces
+Also confirmed: temperature values are in Celsius (28.65 for Autauga
+County, AL in July only makes sense as ~83.6F), not Fahrenheit as this
+script originally assumed. Precipitation is presumed millimeters (NOAA's
+metric-first convention for this product) - converted to inches below.
+Both get converted to the US units our schema/frontend expect.
 
 Usage:
     python ingest_noaa_county_climate.py --discover
@@ -73,8 +80,18 @@ BASE_URL = "https://www.ncei.noaa.gov/data/nclimgrid-daily/access/averages"
 VARIABLES = ["tmax", "tmin", "tavg", "prcp"]
 STATUSES = ["scaled", "prelim"]  # try scaled (final) first, fall back to prelim
 
-FIPS_HINTS = ["fips", "geoid", "county_fips", "cty_fips"]
-ID_HINTS = FIPS_HINTS + ["region", "id"]
+# No header row - fixed column positions, confirmed via --discover.
+COL_REGION_TYPE = 0
+COL_FIPS = 1
+COL_NAME = 2
+COL_YEAR = 3
+COL_MONTH = 4
+COL_VARIABLE = 5
+FIRST_DAY_COL = 6
+
+# Below this, treat a value as a missing-data sentinel rather than a real
+# reading - no real daily temp or precip is anywhere close to this.
+MISSING_SENTINEL_THRESHOLD = -900
 
 
 def _file_url(var: str, year: int, month: int, status: str) -> str:
@@ -82,25 +99,18 @@ def _file_url(var: str, year: int, month: int, status: str) -> str:
     return f"{BASE_URL}/{year}/{var}-{yyyymm}-cty-{status}.csv"
 
 
-def _fetch_csv(var: str, year: int, month: int) -> tuple[pd.DataFrame, str] | None:
+def _fetch_raw_csv(var: str, year: int, month: int) -> tuple[pd.DataFrame, str] | None:
     """Try scaled first, then prelim. Returns (dataframe, url) or None if
-    neither status exists yet for this year-month (e.g. too far in the future)."""
+    neither status exists yet. header=None + fips forced to string - see
+    the no-header/leading-zero note above."""
     for status in STATUSES:
         url = _file_url(var, year, month, status)
         resp = requests.get(url, timeout=60)
         if resp.status_code == 200:
-            return pd.read_csv(io.BytesIO(resp.content)), url
+            df = pd.read_csv(io.BytesIO(resp.content), header=None, dtype={COL_FIPS: str})
+            return df, url
         if resp.status_code != 404:
             resp.raise_for_status()
-    return None
-
-
-def _find_column(columns, hints) -> str | None:
-    lower = {c.lower(): c for c in columns}
-    for hint in hints:
-        for lc, orig in lower.items():
-            if hint in lc:
-                return orig
     return None
 
 
@@ -109,14 +119,12 @@ def discover(year: int | None = None, month: int | None = None) -> None:
     confirm the parsing logic before trusting a full backfill."""
     today = date.today()
     if year is None or month is None:
-        # Default to 2 months ago - recent enough to exist, old enough to
-        # likely have moved past "file not published yet".
         probe = today.month - 2
         year = today.year if probe > 0 else today.year - 1
         month = probe if probe > 0 else probe + 12
 
     log.info("Probing tavg for %d-%02d ...", year, month)
-    result = _fetch_csv("tavg", year, month)
+    result = _fetch_raw_csv("tavg", year, month)
     if result is None:
         log.error("Got 404 for both scaled and prelim at %d-%02d. Tried:\n  %s\n  %s",
                    year, month, _file_url("tavg", year, month, "scaled"),
@@ -126,43 +134,33 @@ def discover(year: int | None = None, month: int | None = None) -> None:
     df, url = result
     log.info("Fetched: %s", url)
     log.info("Shape: %s", df.shape)
-    print("Columns:", df.columns.tolist())
     print(df.head())
+    print("Parsed aggregate (Fahrenheit):")
+    print(_aggregate_month(df, "tavg").head())
 
 
 def _aggregate_month(df: pd.DataFrame, var: str) -> pd.DataFrame:
-    """Collapse one county-by-day dataframe down to one value per county
-    for the month. Handles two possible shapes:
-      - wide: one row per county, one column per day (e.g. '1'..'31')
-      - long: one row per county-day, with a date/day column + a value column
-    Temperature variables are averaged across days; precipitation is summed.
-    """
-    id_col = _find_column(df.columns, ID_HINTS)
-    if not id_col:
-        raise ValueError(f"Could not find a county identifier column in {list(df.columns)}")
-
-    day_cols = [c for c in df.columns if str(c).strip().isdigit()]
-    agg_func = "sum" if var == "prcp" else "mean"
-
-    if day_cols:
-        # Wide format: average/sum across the day-of-month columns.
-        values = df[day_cols].apply(pd.to_numeric, errors="coerce")
-        monthly = values.mean(axis=1) if agg_func == "mean" else values.sum(axis=1, min_count=1)
-        out = pd.DataFrame({"fips_code": df[id_col].astype(str).str.zfill(5), var: monthly})
-        return out
-
-    # Long format: group by county id and aggregate the value column.
-    value_col = _find_column(df.columns, ["value", var])
-    if not value_col:
-        raise ValueError(f"Could not find a value column in {list(df.columns)} for {var}")
-    grouped = (
-        df.assign(fips_code=df[id_col].astype(str).str.zfill(5))
-        .groupby("fips_code")[value_col]
-        .agg(agg_func)
-        .reset_index()
-        .rename(columns={value_col: var})
+    """Collapse one county-by-day dataframe (fixed positional layout, no
+    header - see module docstring) down to one value per county for the
+    month, converted to US units. Temperature variables are averaged
+    across days; precipitation is summed."""
+    day_cols = list(range(FIRST_DAY_COL, df.shape[1]))
+    daily = df[day_cols].apply(
+        lambda col: pd.to_numeric(col.astype(str).str.strip(), errors="coerce")
     )
-    return grouped
+    daily = daily.where(daily > MISSING_SENTINEL_THRESHOLD)  # drop sentinel values to NaN
+
+    if var == "prcp":
+        monthly_mm = daily.sum(axis=1, min_count=1)
+        monthly_value = monthly_mm / 25.4  # mm -> inches
+    else:
+        monthly_c = daily.mean(axis=1, skipna=True)
+        monthly_value = monthly_c * 9 / 5 + 32  # Celsius -> Fahrenheit
+
+    return pd.DataFrame({
+        "fips_code": df[COL_FIPS].astype(str).str.zfill(5),
+        var: monthly_value,
+    })
 
 
 def fetch_month(year: int, month: int) -> pd.DataFrame | None:
@@ -171,7 +169,7 @@ def fetch_month(year: int, month: int) -> pd.DataFrame | None:
     merged: pd.DataFrame | None = None
     sources = []
     for var in VARIABLES:
-        result = _fetch_csv(var, year, month)
+        result = _fetch_raw_csv(var, year, month)
         if result is None:
             log.warning("%d-%02d: no file for %s (may not be published yet)", year, month, var)
             continue
