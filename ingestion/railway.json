@@ -5,7 +5,6 @@
   },
   "deploy": {
     "startCommand": "python ingest_noaa_state_climate.py --discover",
-    "cronSchedule": "0 6 3 * *",
     "restartPolicyType": "NEVER"
   }
 }
