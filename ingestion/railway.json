@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python ingest_noaa_state_climate.py --discover",
+    "startCommand": "python ingest_noaa_state_climate.py --start-year 1991 --end-year 2026",
     "restartPolicyType": "NEVER"
   }
 }
