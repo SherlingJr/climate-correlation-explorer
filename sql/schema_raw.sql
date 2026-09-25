@@ -18,17 +18,48 @@ CREATE TABLE IF NOT EXISTS raw.noaa_county_climate_monthly (
     PRIMARY KEY (fips_code, period_year, period_month)
 );
 
--- Partitioning note: you sketched "partitioned by source + year" in the
--- architecture doc. For this table specifically, hold off - Postgres
--- native partitioning adds real operational overhead (each partition needs
--- its own indexes/maintenance), and at US-county x monthly x 20+ years
--- scale (~3,200 counties x ~270 months = ~860K rows) a single indexed
--- table performs fine on a Railway-sized instance. Reach for partitioning
--- if/when you're ingesting daily station-level data (GSOD) at much higher
--- row counts, not for this pre-aggregated county table.
+-- SCOPE NOTE: the project scope shifted from county-level to state-level
+-- after the county pipeline was fully built and backfilled (portfolio
+-- scope call - state-level was the original intent). The county table
+-- below is left in place since it's harmless and cost-free sitting idle,
+-- but it is NOT used by the current ingestion/dbt/API pipeline - see
+-- raw.noaa_state_climate_monthly instead.
+
+CREATE TABLE IF NOT EXISTS raw.noaa_county_climate_monthly (
+    fips_code     CHAR(5)      NOT NULL,   -- 2-digit state + 3-digit county FIPS, zero-padded
+    period_year   SMALLINT     NOT NULL,
+    period_month  SMALLINT     NOT NULL CHECK (period_month BETWEEN 1 AND 12),
+    tmax_f        NUMERIC(6,2),
+    tmin_f        NUMERIC(6,2),
+    tavg_f        NUMERIC(6,2),
+    prcp_in       NUMERIC(6,2),
+    source_file   TEXT         NOT NULL,
+    ingested_at   DATE         NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (fips_code, period_year, period_month)
+);
 
 CREATE INDEX IF NOT EXISTS idx_noaa_county_climate_year_month
     ON raw.noaa_county_climate_monthly (period_year, period_month);
+
+-- Current pipeline: state-level monthly climate data. state_fips is the
+-- REAL Census 2-digit state FIPS (already corrected from NOAA's own
+-- internal numbering at ingestion time - see ingest_noaa_state_climate.py).
+CREATE TABLE IF NOT EXISTS raw.noaa_state_climate_monthly (
+    state_fips    CHAR(2)      NOT NULL,
+    state_abbr    CHAR(2)      NOT NULL,
+    period_year   SMALLINT     NOT NULL,
+    period_month  SMALLINT     NOT NULL CHECK (period_month BETWEEN 1 AND 12),
+    tmax_f        NUMERIC(6,2),
+    tmin_f        NUMERIC(6,2),
+    tavg_f        NUMERIC(6,2),
+    prcp_in       NUMERIC(6,2),
+    source_file   TEXT         NOT NULL,
+    ingested_at   DATE         NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (state_fips, period_year, period_month)
+);
+
+CREATE INDEX IF NOT EXISTS idx_noaa_state_climate_year_month
+    ON raw.noaa_state_climate_monthly (period_year, period_month);
 
 -- Reference table: every other overlay (USDA, CDC, FBI, iNaturalist) will
 -- join to climate data on fips_code, so get a canonical county list in
