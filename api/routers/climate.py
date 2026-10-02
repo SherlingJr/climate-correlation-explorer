@@ -78,6 +78,38 @@ def state_trend(state: str, start_year: int = 1991, end_year: int = 2026):
     return {"state": state.upper(), "series": [dict(zip(ANNUAL_COLS, r)) for r in rows]}
 
 
+@router.get("/states/trend")
+def states_trend(states: str, start_year: int = 1991, end_year: int = 2026):
+    """Annual series for up to 5 states in ONE call - powers the
+    multi-state trend chart without the frontend firing one request per
+    selected state. states is a comma-separated list of postal
+    abbreviations, e.g. 'GA,FL,TX'."""
+    abbrs = [s.strip().upper() for s in states.split(",") if s.strip()]
+    if not abbrs:
+        raise HTTPException(status_code=422, detail="states must be a non-empty comma-separated list")
+    if len(abbrs) > 5:
+        raise HTTPException(status_code=422, detail="up to 5 states at a time")
+
+    with get_cursor() as cur:
+        cur.execute(
+            f"""
+            select {', '.join(ANNUAL_COLS)}
+            from analytics_marts.mart_state_climate_annual
+            where state_abbr = any(%s)
+              and period_year between %s and %s
+            order by state_abbr, period_year
+            """,
+            (abbrs, start_year, end_year),
+        )
+        rows = cur.fetchall()
+
+    series: dict[str, list[dict]] = {a: [] for a in abbrs}
+    for r in rows:
+        row = dict(zip(ANNUAL_COLS, r))
+        series.setdefault(row["state_abbr"], []).append(row)
+    return {"states": abbrs, "start_year": start_year, "end_year": end_year, "series": series}
+
+
 @router.get("/states/{state}/month/{month}")
 def state_month_drilldown(state: str, month: int):
     """One state's value for one calendar month across every year on

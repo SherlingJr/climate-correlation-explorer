@@ -5,141 +5,315 @@
 <title>US Climate Correlation Explorer</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; background: #0e1117; color: #e6e6e6; }
-  header { padding: 1rem 1.5rem; }
-  header h1 { margin: 0 0 0.25rem; font-size: 1.3rem; }
+  :root { color-scheme: dark; }
+  body {
+    font-family: -apple-system, Helvetica, Arial, sans-serif;
+    margin: 0; background: #0e1117; color: #e6e6e6;
+  }
+  header { padding: 1.25rem 1.5rem 0.5rem; }
+  header h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
   header p { margin: 0; color: #9aa0a6; font-size: 0.9rem; }
-  #controls { padding: 0 1.5rem 0.5rem; display: flex; align-items: center; gap: 1rem; }
-  /* Fixed height, not 80vh - inside a WordPress iframe "viewport height"
-     means the iframe's own height, which we're about to set from the
-     parent page, so 80vh would reference itself and never settle. */
-  #map { width: 100%; height: 640px; }
-  #month-label { min-width: 6rem; font-variant-numeric: tabular-nums; }
-  #play-btn { cursor: pointer; }
-  .note { padding: 0.5rem 1.5rem 1rem; color: #9aa0a6; font-size: 0.8rem; }
+  section { padding: 1rem 1.5rem; border-top: 1px solid #22262e; }
+  section h2 { font-size: 1rem; margin: 0 0 0.75rem; color: #e6e6e6; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
+  .controls label { font-size: 0.85rem; color: #9aa0a6; display: flex; align-items: center; gap: 0.4rem; }
+  select, input[type="number"] {
+    background: #1a1d24; color: #e6e6e6; border: 1px solid #333;
+    border-radius: 4px; padding: 0.3rem 0.5rem; font-size: 0.85rem;
+  }
+  input[type="range"] { width: 220px; }
+  .metric-toggle button {
+    background: #1a1d24; color: #9aa0a6; border: 1px solid #333;
+    padding: 0.3rem 0.8rem; font-size: 0.8rem; cursor: pointer; border-radius: 4px;
+  }
+  .metric-toggle button.active { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
+  .map { width: 100%; height: 440px; }
+  .compare-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .compare-row > div { flex: 1 1 320px; }
+  .compare-row .map { height: 380px; }
+  .state-picker {
+    max-height: 160px; overflow-y: auto; border: 1px solid #333; border-radius: 4px;
+    padding: 0.5rem; columns: 3; column-gap: 0.5rem; width: 100%; max-width: 520px;
+  }
+  .state-picker label { display: block; font-size: 0.8rem; margin-bottom: 0.2rem; white-space: nowrap; }
+  .state-picker input { margin-right: 0.3rem; }
+  #trend-count, #compare-note { font-size: 0.75rem; color: #9aa0a6; }
+  .note { padding: 0.5rem 1.5rem 1.25rem; color: #9aa0a6; font-size: 0.8rem; }
+  .chart { width: 100%; height: 360px; }
 </style>
 </head>
 <body>
+
 <header>
   <h1>US Climate Correlation Explorer</h1>
-  <p>County-level temperature anomaly vs. a 1991&ndash;2020 baseline. Gray = no data for that county/month.</p>
+  <p>State-level temperature trends, 1991&ndash;present, against a 1991&ndash;2020 baseline.</p>
 </header>
-<div id="controls">
-  <button id="play-btn">&#9654; Play</button>
-  <input id="month-slider" type="range" min="0" max="0" value="0" style="flex:1" />
-  <span id="month-label">--</span>
-</div>
-<div id="map"></div>
+
+<section>
+  <h2>Annual map</h2>
+  <div class="controls">
+    <label>Year
+      <input id="map-year" type="range" min="1991" max="2026" value="2026" />
+      <span id="map-year-label">2026</span>
+    </label>
+    <div class="metric-toggle" id="map-metric-toggle">
+      <button data-metric="anomaly" class="active">Anomaly</button>
+      <button data-metric="avg">Avg Temp</button>
+    </div>
+  </div>
+  <div id="map-primary" class="map"></div>
+</section>
+
+<section>
+  <h2>Compare two years</h2>
+  <div class="controls">
+    <label>Start <input id="compare-start" type="number" min="1991" max="2026" value="1991" /></label>
+    <label>End <input id="compare-end" type="number" min="1991" max="2026" value="2026" /></label>
+    <span id="compare-note"></span>
+  </div>
+  <div class="compare-row">
+    <div><div id="map-compare-start" class="map"></div></div>
+    <div><div id="map-compare-end" class="map"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Trend over time</h2>
+  <div class="controls">
+    <label>From <input id="trend-start" type="number" min="1991" max="2026" value="1991" /></label>
+    <label>To <input id="trend-end" type="number" min="1991" max="2026" value="2026" /></label>
+    <div class="metric-toggle" id="trend-metric-toggle">
+      <button data-metric="anomaly" class="active">Anomaly</button>
+      <button data-metric="avg">Avg Temp</button>
+    </div>
+    <span id="trend-count">0 / 5 states selected</span>
+  </div>
+  <div class="state-picker" id="trend-state-picker"></div>
+  <div id="chart-trend" class="chart"></div>
+</section>
+
+<section>
+  <h2>Seasonal drill-down</h2>
+  <div class="controls">
+    <label>State
+      <select id="drilldown-state"></select>
+    </label>
+    <label>Month
+      <select id="drilldown-month"></select>
+    </label>
+  </div>
+  <div id="chart-drilldown" class="chart"></div>
+</section>
+
 <p class="note">
-  Correlation &ne; causation. Overlay datasets (crop yields, mortality, crime) will appear in the
-  selector here once Phase 2/3 land. Coverage: contiguous 48 states + DC (NOAA's source data
-  does not include Alaska, Hawaii, or the territories).
+  Correlation &ne; causation. Coverage: contiguous 48 states (NOAA's source data does not
+  include Alaska, Hawaii, or the territories). Overlay datasets (crop yields, mortality,
+  crime) will appear here once Phase 2/3 land.
 </p>
 
 <script>
-const START_YEAR = 2004;
-const END_YEAR = new Date().getFullYear();
-const MONTHS = [];
-for (let y = START_YEAR; y <= END_YEAR; y++) {
-  for (let m = 1; m <= 12; m++) MONTHS.push([y, m]);
-}
+const STATES = [
+  ["AL","Alabama"],["AZ","Arizona"],["AR","Arkansas"],["CA","California"],["CO","Colorado"],
+  ["CT","Connecticut"],["DE","Delaware"],["FL","Florida"],["GA","Georgia"],["ID","Idaho"],
+  ["IL","Illinois"],["IN","Indiana"],["IA","Iowa"],["KS","Kansas"],["KY","Kentucky"],
+  ["LA","Louisiana"],["ME","Maine"],["MD","Maryland"],["MA","Massachusetts"],["MI","Michigan"],
+  ["MN","Minnesota"],["MS","Mississippi"],["MO","Missouri"],["MT","Montana"],["NE","Nebraska"],
+  ["NV","Nevada"],["NH","New Hampshire"],["NJ","New Jersey"],["NM","New Mexico"],["NY","New York"],
+  ["NC","North Carolina"],["ND","North Dakota"],["OH","Ohio"],["OK","Oklahoma"],["OR","Oregon"],
+  ["PA","Pennsylvania"],["RI","Rhode Island"],["SC","South Carolina"],["SD","South Dakota"],
+  ["TN","Tennessee"],["TX","Texas"],["UT","Utah"],["VT","Vermont"],["VA","Virginia"],
+  ["WA","Washington"],["WV","West Virginia"],["WI","Wisconsin"],["WY","Wyoming"],
+];
+const MONTHS = ["January","February","March","April","May","June","July","August",
+                "September","October","November","December"];
+const TREND_COLORS = ["#4C9AFF", "#FF8A65", "#81C784", "#FFD54F", "#BA68C8"];
 
-const slider = document.getElementById("month-slider");
-const label = document.getElementById("month-label");
-const playBtn = document.getElementById("play-btn");
-slider.max = MONTHS.length - 1;
+const METRIC = {
+  anomaly: { field: "anomaly_f", colorscale: "RdBu", reversescale: true, zmin: -6, zmax: 6, zmid: 0,
+             title: "\u00b0F anomaly", axisTitle: "Anomaly (\u00b0F)" },
+  avg:     { field: "tavg_f", colorscale: "RdYlBu", reversescale: true, zmin: 30, zmax: 85, zmid: 57,
+             title: "\u00b0F avg", axisTitle: "Avg temp (\u00b0F)" },
+};
 
-let geojson = null;
-const frameCache = new Map(); // "year-month" -> {fips: [...], anomaly: [...], hover: [...]}
-let playing = false;
-let playTimer = null;
-
-async function loadGeojson() {
-  // Plotly's maintained public US county boundary geojson, keyed by 5-digit FIPS.
-  const resp = await fetch("https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json");
-  geojson = await resp.json();
-}
-
-async function loadFrame(year, month) {
-  const key = `${year}-${month}`;
-  if (frameCache.has(key)) return frameCache.get(key);
-  const resp = await fetch(`/api/climate/map/${year}/${month}`);
-  const data = await resp.json();
-  const fips = [], anomaly = [], hover = [];
-  for (const c of data.counties) {
-    fips.push(c.fips_code);
-    anomaly.push(c.has_data_gap ? null : c.anomaly_f);
-    hover.push(`${c.county_name || c.fips_code}, ${c.state_abbr || ""}<br>Anomaly: ${
-      c.has_data_gap ? "no data" : c.anomaly_f.toFixed(1) + "\u00b0F"
-    }`);
-  }
-  const frame = { fips, anomaly, hover };
-  frameCache.set(key, frame);
-  return frame;
-}
-
-async function renderFrame(index) {
-  const [year, month] = MONTHS[index];
-  label.textContent = `${year}-${String(month).padStart(2, "0")}`;
-  const frame = await loadFrame(year, month);
-
-  const trace = {
-    type: "choropleth",
-    geojson,
-    locations: frame.fips,
-    z: frame.anomaly,
-    featureidkey: "id",
-    colorscale: "RdBu",
-    reversescale: true,
-    zmid: 0,
-    zmin: -6,
-    zmax: 6,
-    marker: { line: { width: 0.3, color: "#333" } },
-    text: frame.hover,
-    hoverinfo: "text",
-    colorbar: { title: "\u00b0F anomaly" },
-  };
-
-  const layout = {
-    geo: { scope: "usa", bgcolor: "rgba(0,0,0,0)" },
-    paper_bgcolor: "#0e1117",
-    plot_bgcolor: "#0e1117",
-    font: { color: "#e6e6e6" },
-    margin: { t: 10, b: 10, l: 10, r: 10 },
-  };
-
-  Plotly.react("map", [trace], layout, { responsive: true, displayModeBar: false });
-}
-
-slider.addEventListener("input", (e) => renderFrame(Number(e.target.value)));
-
-playBtn.addEventListener("click", () => {
-  playing = !playing;
-  playBtn.innerHTML = playing ? "&#10074;&#10074; Pause" : "&#9654; Play";
-  if (playing) {
-    playTimer = setInterval(() => {
-      let next = Number(slider.value) + 1;
-      if (next > Number(slider.max)) next = 0;
-      slider.value = next;
-      renderFrame(next);
-    }, 350);
-  } else {
-    clearInterval(playTimer);
-  }
+const commonGeoLayout = () => ({
+  geo: { scope: "usa", bgcolor: "rgba(0,0,0,0)", showland: false, showlakes: false,
+         showsubunits: true, subunitcolor: "#333" },
+  paper_bgcolor: "#0e1117",
+  plot_bgcolor: "#0e1117",
+  font: { color: "#e6e6e6" },
+  margin: { t: 10, b: 10, l: 10, r: 10 },
 });
 
-(async function init() {
-  await loadGeojson();
-  await renderFrame(MONTHS.length - 1); // start on the most recent month
-  slider.value = MONTHS.length - 1;
-})();
+const chartLayoutBase = (yTitle) => ({
+  paper_bgcolor: "#0e1117",
+  plot_bgcolor: "#0e1117",
+  font: { color: "#e6e6e6" },
+  margin: { t: 20, b: 40, l: 55, r: 20 },
+  xaxis: { title: "Year", gridcolor: "#22262e" },
+  yaxis: { title: yTitle, gridcolor: "#22262e" },
+  legend: { orientation: "h", y: -0.2 },
+});
 
-// --- WordPress iframe auto-resize ---
-// This app doesn't know its own embedded height ahead of time (WordPress
-// column widths vary by theme), so instead of guessing a fixed iframe
-// height on the WordPress side, this page reports its real content height
-// to whichever page embeds it, and the parent resizes the iframe to match.
-// See the matching listener snippet in the deploy README's WordPress section.
+function makeMapTrace(states, metricKey) {
+  const m = METRIC[metricKey];
+  return {
+    type: "choropleth",
+    locationmode: "USA-states",
+    locations: states.map(s => s.state_abbr),
+    z: states.map(s => s[m.field]),
+    text: states.map(s => `${s.state_abbr}: ${s[m.field] != null ? s[m.field].toFixed(1) : "n/a"}\u00b0F`),
+    hoverinfo: "text",
+    colorscale: m.colorscale,
+    reversescale: m.reversescale,
+    zmin: m.zmin, zmax: m.zmax, zmid: m.zmid,
+    marker: { line: { width: 0.5, color: "#333" } },
+    colorbar: { title: m.title },
+  };
+}
+
+// ---------- Primary map ----------
+let mapMetric = "anomaly";
+const mapYearInput = document.getElementById("map-year");
+const mapYearLabel = document.getElementById("map-year-label");
+
+async function renderPrimaryMap() {
+  const year = Number(mapYearInput.value);
+  mapYearLabel.textContent = year;
+  const resp = await fetch(`/api/states/map/${year}`);
+  const data = await resp.json();
+  Plotly.react("map-primary", [makeMapTrace(data.states, mapMetric)], commonGeoLayout(),
+               { responsive: true, displayModeBar: false });
+}
+mapYearInput.addEventListener("change", renderPrimaryMap);
+document.getElementById("map-metric-toggle").addEventListener("click", (e) => {
+  if (!e.target.dataset.metric) return;
+  mapMetric = e.target.dataset.metric;
+  [...e.currentTarget.children].forEach(b => b.classList.toggle("active", b === e.target));
+  renderPrimaryMap();
+});
+
+// ---------- Compare ----------
+const compareStart = document.getElementById("compare-start");
+const compareEnd = document.getElementById("compare-end");
+const compareNote = document.getElementById("compare-note");
+
+async function renderCompare() {
+  const startYear = Number(compareStart.value);
+  const endYear = Number(compareEnd.value);
+  compareNote.textContent = "";
+  if (startYear >= endYear) {
+    compareNote.textContent = "Start year must be before end year.";
+    return;
+  }
+  const resp = await fetch(`/api/states/compare?start_year=${startYear}&end_year=${endYear}`);
+  const data = await resp.json();
+  Plotly.react("map-compare-start", [makeMapTrace(data.start, mapMetric)], commonGeoLayout(),
+               { responsive: true, displayModeBar: false });
+  Plotly.react("map-compare-end", [makeMapTrace(data.end, mapMetric)], commonGeoLayout(),
+               { responsive: true, displayModeBar: false });
+}
+compareStart.addEventListener("change", renderCompare);
+compareEnd.addEventListener("change", renderCompare);
+
+// ---------- Trend (multi-state) ----------
+const pickerDiv = document.getElementById("trend-state-picker");
+const trendCount = document.getElementById("trend-count");
+let trendMetric = "anomaly";
+const DEFAULT_TREND_STATES = ["FL", "TX", "NY"];
+
+STATES.forEach(([abbr, name]) => {
+  const label = document.createElement("label");
+  const checked = DEFAULT_TREND_STATES.includes(abbr) ? "checked" : "";
+  label.innerHTML = `<input type="checkbox" value="${abbr}" ${checked}/> ${abbr} - ${name}`;
+  pickerDiv.appendChild(label);
+});
+
+function selectedTrendStates() {
+  return [...pickerDiv.querySelectorAll("input:checked")].map(i => i.value);
+}
+
+function enforceTrendLimit(e) {
+  const selected = selectedTrendStates();
+  trendCount.textContent = `${selected.length} / 5 states selected`;
+  if (selected.length > 5) {
+    e.target.checked = false;
+    trendCount.textContent = "5 / 5 states selected (max)";
+  }
+}
+pickerDiv.addEventListener("change", (e) => { enforceTrendLimit(e); renderTrend(); });
+
+async function renderTrend() {
+  const states = selectedTrendStates();
+  if (states.length === 0) {
+    Plotly.react("chart-trend", [], chartLayoutBase(METRIC[trendMetric].axisTitle));
+    return;
+  }
+  const startYear = Number(document.getElementById("trend-start").value);
+  const endYear = Number(document.getElementById("trend-end").value);
+  const resp = await fetch(`/api/states/trend?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`);
+  const data = await resp.json();
+  const field = METRIC[trendMetric].field;
+  const traces = states.map((abbr, i) => {
+    const series = data.series[abbr] || [];
+    return {
+      type: "scatter", mode: "lines+markers", name: abbr,
+      x: series.map(r => r.period_year),
+      y: series.map(r => r[field]),
+      line: { color: TREND_COLORS[i % TREND_COLORS.length] },
+    };
+  });
+  Plotly.react("chart-trend", traces, chartLayoutBase(METRIC[trendMetric].axisTitle),
+               { responsive: true, displayModeBar: false });
+}
+document.getElementById("trend-start").addEventListener("change", renderTrend);
+document.getElementById("trend-end").addEventListener("change", renderTrend);
+document.getElementById("trend-metric-toggle").addEventListener("click", (e) => {
+  if (!e.target.dataset.metric) return;
+  trendMetric = e.target.dataset.metric;
+  [...e.currentTarget.children].forEach(b => b.classList.toggle("active", b === e.target));
+  renderTrend();
+});
+
+// ---------- Seasonal drill-down ----------
+const stateSelect = document.getElementById("drilldown-state");
+const monthSelect = document.getElementById("drilldown-month");
+STATES.forEach(([abbr, name]) => {
+  const opt = document.createElement("option");
+  opt.value = abbr; opt.textContent = `${name} (${abbr})`;
+  stateSelect.appendChild(opt);
+});
+stateSelect.value = "GA";
+MONTHS.forEach((name, i) => {
+  const opt = document.createElement("option");
+  opt.value = i + 1; opt.textContent = name;
+  monthSelect.appendChild(opt);
+});
+monthSelect.value = 7;
+
+async function renderDrilldown() {
+  const state = stateSelect.value;
+  const month = monthSelect.value;
+  const resp = await fetch(`/api/states/${state}/month/${month}`);
+  const data = await resp.json();
+  const trace = {
+    type: "scatter", mode: "lines+markers", name: `${state} - ${MONTHS[month - 1]}`,
+    x: data.series.map(r => r.period_year),
+    y: data.series.map(r => r.tavg_f),
+    line: { color: TREND_COLORS[0] },
+  };
+  Plotly.react("chart-drilldown", [trace], chartLayoutBase("Avg temp (\u00b0F)"),
+               { responsive: true, displayModeBar: false });
+}
+stateSelect.addEventListener("change", renderDrilldown);
+monthSelect.addEventListener("change", renderDrilldown);
+
+// ---------- Init ----------
+renderPrimaryMap();
+renderCompare();
+renderTrend();
+renderDrilldown();
+
+// ---------- WordPress iframe auto-resize ----------
 function reportHeight() {
   const height = document.documentElement.scrollHeight;
   window.parent.postMessage({ type: "climate-explorer-resize", height }, "*");
