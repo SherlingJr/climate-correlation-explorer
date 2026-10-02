@@ -90,7 +90,7 @@
   </div>
   <div class="state-picker" id="trend-state-picker"></div>
   <div id="chart-trend" class="chart"></div>
-  <p class="note" style="padding:0.25rem 0 0;">Faint line = actual yearly value. Bold line = 5-year moving average (smooths out single hot/cold years so the underlying trend reads clearly).</p>
+  <p class="note" style="padding:0.25rem 0 0;">Lines show a 5-year moving average (smooths out single hot/cold years so the underlying trend reads clearly).</p>
 </section>
 
 <section>
@@ -104,7 +104,7 @@
     </label>
   </div>
   <div id="chart-drilldown" class="chart"></div>
-  <p class="note" style="padding:0.25rem 0 0;">Faint line = actual value that year. Bold line = 5-year moving average.</p>
+  <p class="note" style="padding:0.25rem 0 0;">Line shows a 5-year moving average.</p>
 </section>
 
 <p class="note">
@@ -270,21 +270,17 @@ async function renderTrend() {
   const resp = await fetch(`/api/states/trend?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`);
   const data = await resp.json();
   const field = METRIC[trendMetric].field;
-  const traces = states.flatMap((abbr, i) => {
+  const traces = states.map((abbr, i) => {
     const series = data.series[abbr] || [];
     const x = series.map(r => r.period_year);
     const y = series.map(r => r[field]);
     const color = TREND_COLORS[i % TREND_COLORS.length];
-    return [
-      { // faint actual-year values, for reference - not in the legend
-        type: "scatter", mode: "lines", x, y,
-        line: { color, width: 1 }, opacity: 0.3, showlegend: false, hoverinfo: "skip",
-      },
-      { // bold 5-year moving average - the line to actually read
-        type: "scatter", mode: "lines", name: abbr, x, y: movingAverage(y, 5),
-        line: { color, width: 3 },
-      },
-    ];
+    return { // 5-year moving average - raw yearly line removed for now,
+              // may come back once overlay datasets (crime, crop yields,
+              // travel) give it more context to sit alongside
+      type: "scatter", mode: "lines", name: abbr, x, y: movingAverage(y, 5),
+      line: { color, width: 3 },
+    };
   });
   Plotly.react("chart-trend", traces, chartLayoutBase(METRIC[trendMetric].axisTitle),
                { responsive: true, displayModeBar: false });
@@ -321,13 +317,11 @@ async function renderDrilldown() {
   const data = await resp.json();
   const x = data.series.map(r => r.period_year);
   const y = data.series.map(r => r.tavg_f);
-  const traces = [
-    { type: "scatter", mode: "lines", x, y,
-      line: { color: TREND_COLORS[0], width: 1 }, opacity: 0.3, showlegend: false, hoverinfo: "skip" },
-    { type: "scatter", mode: "lines", name: `${state} - ${MONTHS[month - 1]}`, x, y: movingAverage(y, 5),
-      line: { color: TREND_COLORS[0], width: 3 } },
-  ];
-  Plotly.react("chart-drilldown", traces, chartLayoutBase("Avg temp (\u00b0F)"),
+  const trace = {
+    type: "scatter", mode: "lines", name: `${state} - ${MONTHS[month - 1]}`, x, y: movingAverage(y, 5),
+    line: { color: TREND_COLORS[0], width: 3 },
+  };
+  Plotly.react("chart-drilldown", [trace], chartLayoutBase("Avg temp (\u00b0F)"),
                { responsive: true, displayModeBar: false });
 }
 stateSelect.addEventListener("change", renderDrilldown);
