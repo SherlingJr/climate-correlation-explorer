@@ -4,10 +4,10 @@ sources:
   - name: raw
     schema: raw
     tables:
-      - name: noaa_county_climate_monthly
-        description: Monthly county-level temp/precip from NOAA EpiNOAA, loaded by ingest_noaa_county_climate.py
+      - name: noaa_state_climate_monthly
+        description: Monthly state-level temp/precip from NOAA nClimGrid-Daily, loaded by ingest_noaa_state_climate.py. state_fips is already the real Census FIPS (remapped from NOAA's internal numbering at ingestion).
         columns:
-          - name: fips_code
+          - name: state_fips
             tests:
               - not_null
           - name: period_year
@@ -16,33 +16,45 @@ sources:
           - name: period_month
             tests:
               - not_null
-      - name: county_fips_reference
-        description: Canonical US county list from Census TIGER/Line gazetteer
+      # noaa_county_climate_monthly and county_fips_reference intentionally
+      # omitted here - the county pipeline is retired (see sql/schema_raw.sql
+      # note). The tables still exist in Postgres, just unused by dbt now.
 
 models:
-  - name: stg_noaa_climate_county
+  - name: stg_noaa_climate_state
     columns:
-      - name: fips_code
+      - name: state_fips
         tests:
           - not_null
       - name: period_date
         tests:
           - not_null
 
-  - name: int_climate_anomaly_by_county
+  - name: int_climate_anomaly_by_state
     columns:
-      - name: fips_code
+      - name: state_fips
         tests:
           - not_null
 
-  - name: mart_climate_trends
+  - name: mart_state_climate_monthly
     columns:
-      - name: fips_code
+      - name: state_fips
         tests:
           - not_null
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
-            - fips_code
+            - state_fips
             - period_year
             - period_month
+
+  - name: mart_state_climate_annual
+    columns:
+      - name: state_fips
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - state_fips
+            - period_year
