@@ -90,6 +90,7 @@
   </div>
   <div class="state-picker" id="trend-state-picker"></div>
   <div id="chart-trend" class="chart"></div>
+  <p class="note" style="padding:0.25rem 0 0;">Faint line = actual yearly value. Bold line = 5-year moving average (smooths out single hot/cold years so the underlying trend reads clearly).</p>
 </section>
 
 <section>
@@ -103,6 +104,7 @@
     </label>
   </div>
   <div id="chart-drilldown" class="chart"></div>
+  <p class="note" style="padding:0.25rem 0 0;">Faint line = actual value that year. Bold line = 5-year moving average.</p>
 </section>
 
 <p class="note">
@@ -153,6 +155,21 @@ const chartLayoutBase = (yTitle) => ({
   yaxis: { title: yTitle, gridcolor: "#22262e" },
   legend: { orientation: "h", y: -0.2 },
 });
+
+// Centered moving average with shrinking windows at the edges (so the
+// smoothed line still spans the full range instead of being cut short).
+// A plain year-over-year line is noisy at the couple-degree scale this
+// data moves at - a single hot or cold year can swamp the real trend, so
+// this is what makes the underlying direction readable.
+function movingAverage(values, window = 5) {
+  const half = Math.floor(window / 2);
+  return values.map((_, i) => {
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(values.length - 1, i + half);
+    const slice = values.slice(lo, hi + 1).filter(v => v != null && !Number.isNaN(v));
+    return slice.length ? slice.reduce((a, b) => a + b, 0) / slice.length : null;
+  });
+}
 
 function makeMapTrace(states, metricKey) {
   const m = METRIC[metricKey];
@@ -253,14 +270,21 @@ async function renderTrend() {
   const resp = await fetch(`/api/states/trend?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`);
   const data = await resp.json();
   const field = METRIC[trendMetric].field;
-  const traces = states.map((abbr, i) => {
+  const traces = states.flatMap((abbr, i) => {
     const series = data.series[abbr] || [];
-    return {
-      type: "scatter", mode: "lines+markers", name: abbr,
-      x: series.map(r => r.period_year),
-      y: series.map(r => r[field]),
-      line: { color: TREND_COLORS[i % TREND_COLORS.length] },
-    };
+    const x = series.map(r => r.period_year);
+    const y = series.map(r => r[field]);
+    const color = TREND_COLORS[i % TREND_COLORS.length];
+    return [
+      { // faint actual-year values, for reference - not in the legend
+        type: "scatter", mode: "lines", x, y,
+        line: { color, width: 1 }, opacity: 0.3, showlegend: false, hoverinfo: "skip",
+      },
+      { // bold 5-year moving average - the line to actually read
+        type: "scatter", mode: "lines", name: abbr, x, y: movingAverage(y, 5),
+        line: { color, width: 3 },
+      },
+    ];
   });
   Plotly.react("chart-trend", traces, chartLayoutBase(METRIC[trendMetric].axisTitle),
                { responsive: true, displayModeBar: false });
@@ -295,13 +319,15 @@ async function renderDrilldown() {
   const month = monthSelect.value;
   const resp = await fetch(`/api/states/${state}/month/${month}`);
   const data = await resp.json();
-  const trace = {
-    type: "scatter", mode: "lines+markers", name: `${state} - ${MONTHS[month - 1]}`,
-    x: data.series.map(r => r.period_year),
-    y: data.series.map(r => r.tavg_f),
-    line: { color: TREND_COLORS[0] },
-  };
-  Plotly.react("chart-drilldown", [trace], chartLayoutBase("Avg temp (\u00b0F)"),
+  const x = data.series.map(r => r.period_year);
+  const y = data.series.map(r => r.tavg_f);
+  const traces = [
+    { type: "scatter", mode: "lines", x, y,
+      line: { color: TREND_COLORS[0], width: 1 }, opacity: 0.3, showlegend: false, hoverinfo: "skip" },
+    { type: "scatter", mode: "lines", name: `${state} - ${MONTHS[month - 1]}`, x, y: movingAverage(y, 5),
+      line: { color: TREND_COLORS[0], width: 3 } },
+  ];
+  Plotly.react("chart-drilldown", traces, chartLayoutBase("Avg temp (\u00b0F)"),
                { responsive: true, displayModeBar: false });
 }
 stateSelect.addEventListener("change", renderDrilldown);
