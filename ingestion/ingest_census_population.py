@@ -101,31 +101,32 @@ def discover() -> None:
     print(" status:", resp.status_code)
     print(" body:", resp.text[:2000])
 
-    log.info("=== Catalog scan: every PEP (population estimates) dataset vintage 2020+ ===")
-    cat = requests.get("https://api.census.gov/data.json", timeout=120)
-    print(" catalog status:", cat.status_code)
-    found = []
-    if cat.status_code == 200:
-        for ds in cat.json().get("dataset", []):
-            ident = "/".join(ds.get("c_dataset", []) or [])
-            vintage = ds.get("c_vintage")
-            if ident.startswith("pep/") and vintage and int(vintage) >= 2020:
-                found.append((int(vintage), ident, ds.get("title", "")))
-    for vintage, ident, title in sorted(found):
-        print(f"  {vintage}  {ident}  -- {title}")
-    if not found:
-        print("  (none found - will probe candidate URLs directly)")
+    log.info("=== 2021 vintage API (POP_2020, POP_2021): sample query, Alabama ===")
+    resp = requests.get(
+        f"{BASE_URL}/2021/pep/population",
+        params={"get": "NAME,POP_2020,POP_2021", "for": "state:01", "key": key},
+        timeout=30,
+    )
+    print(" status:", resp.status_code)
+    print(" body:", resp.text[:500])
 
-    log.info("=== Direct probe of candidate variables.json URLs ===")
-    for vintage in (2020, 2021, 2022, 2023, 2024, 2025):
-        for ds_name in ("population", "natmonthly", "charv"):
-            url = f"{BASE_URL}/{vintage}/pep/{ds_name}/variables.json"
-            r = requests.get(url, timeout=30)
-            extra = ""
-            if r.status_code == 200:
-                pv = sorted(v for v in r.json().get("variables", {}) if v.startswith("POP"))
-                extra = f" POP vars: {pv}"
-            print(f"  {r.status_code}  {url}{extra}")
+    log.info("=== Flat-file probe: Census state totals CSVs (2022+ is not in the API) ===")
+    base = "https://www2.census.gov/programs-surveys/popest/datasets"
+    candidates = [
+        f"{base}/2020-2025/state/totals/NST-EST2025-ALLDATA.csv",
+        f"{base}/2020-2024/state/totals/NST-EST2024-ALLDATA.csv",
+        f"{base}/2020-2023/state/totals/NST-EST2023-ALLDATA.csv",
+    ]
+    for url in candidates:
+        r = requests.get(url, timeout=60, headers={"User-Agent": "kasling-analytics-climate-explorer/1.0"})
+        print(f"  {r.status_code}  {url}")
+        if r.status_code == 200:
+            lines = r.text.splitlines()
+            print("   header:", lines[0][:600])
+            for line in lines[1:]:
+                if ",Alabama," in line:
+                    print("   Alabama:", line[:400])
+                    break
 
 
 def main():
