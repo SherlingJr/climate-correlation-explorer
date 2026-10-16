@@ -35,10 +35,14 @@ Usage:
 """
 
 import argparse
+import io
 import logging
 import os
 import sys
 
+import pandas as pd
+import psycopg2
+import psycopg2.extras
 import requests
 
 logging.basicConfig(
@@ -129,18 +133,125 @@ def discover() -> None:
                     break
 
 
+
+DDL = """
+CREATE SCHEMA IF NOT EXISTS raw;
+CREATE TABLE IF NOT EXISTS raw.census_population_annual (
+    state_fips   CHAR(2)     NOT NULL,
+    state_abbr   CHAR(2)     NOT NULL,
+    period_year  SMALLINT    NOT NULL,
+    population   BIGINT      NOT NULL,
+    source       TEXT        NOT NULL,
+    ingested_at  DATE        NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (state_fips, period_year)
+);
+"""
+
+CSV_BASE = "https://www2.census.gov/programs-surveys/popest/datasets"
+# Newest first; the first one that responds 200 wins. Add new years on top.
+CSV_CANDIDATES = [
+    ("2020-2025", "NST-EST2025-ALLDATA.csv"),
+    ("2020-2024", "NST-EST2024-ALLDATA.csv"),
+]
+UA = {"User-Agent": "kasling-analytics-climate-explorer/1.0"}
+
+
+def fetch_2010s(key: str) -> pd.DataFrame:
+    """2010-2019 from the 2019-vintage API. DATE_CODE 3..12 = July 1 of
+    2010..2019 (codes 1-2 are the April 2010 census/base rows - skipped)."""
+    resp = requests.get(
+        f"{BASE_URL}/{OLD_VINTAGE}/pep/population",
+        params={"get": "NAME,POP,DATE_CODE", "for": "state:*", "key": key},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    rows = resp.json()
+    df = pd.DataFrame(rows[1:], columns=rows[0])
+    df["date_code"] = df["DATE_CODE"].astype(int)
+    df = df[df["date_code"].between(3, 12)].copy()
+    df["period_year"] = df["date_code"] + 2007  # 3 -> 2010 ... 12 -> 2019
+    df["state_fips"] = df["state"].str.zfill(2)
+    df["population"] = df["POP"].astype("int64")
+    df["source"] = f"api_{OLD_VINTAGE}_vintage"
+    return df[["state_fips", "period_year", "population", "source"]]
+
+
+def fetch_2020s() -> pd.DataFrame:
+    """2020-present from Census's flat state-totals CSV (the API stops at
+    vintage 2021). POPESTIMATEyyyy = July 1 estimate."""
+    for folder, fname in CSV_CANDIDATES:
+        url = f"{CSV_BASE}/{folder}/state/totals/{fname}"
+        resp = requests.get(url, timeout=60, headers=UA)
+        if resp.status_code != 200:
+            log.warning("CSV %s returned %s, trying next", url, resp.status_code)
+            continue
+        raw = pd.read_csv(io.StringIO(resp.text), dtype={"STATE": str})
+        raw = raw[raw["SUMLEV"].astype(str).str.zfill(3) == "040"]
+        cols = [c for c in raw.columns if c.startswith("POPESTIMATE")]
+        long = raw.melt(id_vars=["STATE"], value_vars=cols,
+                        var_name="col", value_name="population")
+        long["period_year"] = long["col"].str.replace("POPESTIMATE", "").astype(int)
+        long["state_fips"] = long["STATE"].str.zfill(2)
+        long["population"] = long["population"].astype("int64")
+        long["source"] = fname
+        log.info("Using %s (years %d-%d)", fname,
+                 long["period_year"].min(), long["period_year"].max())
+        return long[["state_fips", "period_year", "population", "source"]]
+    raise RuntimeError("No Census state-totals CSV candidate responded 200")
+
+
+def backfill() -> None:
+    key = _get_key()
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        log.error("DATABASE_URL is not set.")
+        sys.exit(1)
+
+    df = pd.concat([fetch_2010s(key), fetch_2020s()], ignore_index=True)
+    df = df[df["state_fips"].isin(FIPS_TO_ABBR)].copy()
+    df["state_abbr"] = df["state_fips"].map(FIPS_TO_ABBR)
+    df = df.drop_duplicates(["state_fips", "period_year"], keep="last")
+
+    expected = 48 * (df["period_year"].max() - 2010 + 1)
+    log.info("Prepared %d rows, %d states, years %d-%d (expected %d)",
+             len(df), df["state_fips"].nunique(),
+             df["period_year"].min(), df["period_year"].max(), expected)
+    if len(df) != expected:
+        log.warning("Row count differs from expected - check for missing states/years")
+
+    records = [
+        (r.state_fips, r.state_abbr, int(r.period_year), int(r.population), r.source)
+        for r in df.itertuples()
+    ]
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(DDL)
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO raw.census_population_annual
+                (state_fips, state_abbr, period_year, population, source)
+            VALUES %s
+            ON CONFLICT (state_fips, period_year) DO UPDATE SET
+                population = EXCLUDED.population,
+                source = EXCLUDED.source,
+                ingested_at = CURRENT_DATE
+            """,
+            records,
+        )
+    log.info("Done. %d rows upserted into raw.census_population_annual", len(records))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--discover", action="store_true")
+    parser.add_argument("--discover", action="store_true",
+                        help="print schema/endpoint info only; no DB writes")
     args = parser.parse_args()
 
     if args.discover:
         discover()
         return
 
-    log.error("Only --discover is implemented so far - confirm the schema first, "
-              "then the real backfill logic gets added based on what it shows.")
-    sys.exit(1)
+    backfill()
 
 
 if __name__ == "__main__":

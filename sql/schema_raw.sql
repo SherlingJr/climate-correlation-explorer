@@ -76,3 +76,16 @@ CREATE TABLE IF NOT EXISTS raw.county_fips_reference (
 
 CREATE INDEX IF NOT EXISTS idx_county_fips_state
     ON raw.county_fips_reference (state_fips);
+
+-- Census annual state population (July 1 estimates), 2010-present. Used as
+-- the per-capita denominator for other overlays. Created by
+-- ingest_census_population.py too, kept here as documentation.
+CREATE TABLE IF NOT EXISTS raw.census_population_annual (
+    state_fips   CHAR(2)     NOT NULL,
+    state_abbr   CHAR(2)     NOT NULL,
+    period_year  SMALLINT    NOT NULL,
+    population   BIGINT      NOT NULL,
+    source       TEXT        NOT NULL,
+    ingested_at  DATE        NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (state_fips, period_year)
+);
