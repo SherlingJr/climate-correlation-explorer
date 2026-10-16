@@ -101,24 +101,31 @@ def discover() -> None:
     print(" status:", resp.status_code)
     print(" body:", resp.text[:2000])
 
-    log.info("=== New-format vintage %d: variables.json (look for POP_20xx columns) ===", NEW_VINTAGE)
-    resp = requests.get(f"{BASE_URL}/{NEW_VINTAGE}/pep/population/variables.json", timeout=30)
-    if resp.status_code == 200:
-        variables = resp.json().get("variables", {})
-        pop_vars = sorted(v for v in variables if v.startswith("POP_"))
-        print("  POP_* variables found:", pop_vars)
-    else:
-        log.warning("Vintage %d variables.json returned %s - may need a different vintage year",
-                     NEW_VINTAGE, resp.status_code)
+    log.info("=== Catalog scan: every PEP (population estimates) dataset vintage 2020+ ===")
+    cat = requests.get("https://api.census.gov/data.json", timeout=120)
+    print(" catalog status:", cat.status_code)
+    found = []
+    if cat.status_code == 200:
+        for ds in cat.json().get("dataset", []):
+            ident = "/".join(ds.get("c_dataset", []) or [])
+            vintage = ds.get("c_vintage")
+            if ident.startswith("pep/") and vintage and int(vintage) >= 2020:
+                found.append((int(vintage), ident, ds.get("title", "")))
+    for vintage, ident, title in sorted(found):
+        print(f"  {vintage}  {ident}  -- {title}")
+    if not found:
+        print("  (none found - will probe candidate URLs directly)")
 
-    log.info("=== New-format vintage %d: sample query for one state (Alabama, FIPS 01) ===", NEW_VINTAGE)
-    resp = requests.get(
-        f"{BASE_URL}/{NEW_VINTAGE}/pep/population",
-        params={"get": "NAME,POPULATION,DATE_CODE", "for": "state:01", "key": key},
-        timeout=30,
-    )
-    print(" status (POPULATION,DATE_CODE guess):", resp.status_code)
-    print(" body:", resp.text[:2000])
+    log.info("=== Direct probe of candidate variables.json URLs ===")
+    for vintage in (2020, 2021, 2022, 2023, 2024, 2025):
+        for ds_name in ("population", "natmonthly", "charv"):
+            url = f"{BASE_URL}/{vintage}/pep/{ds_name}/variables.json"
+            r = requests.get(url, timeout=30)
+            extra = ""
+            if r.status_code == 200:
+                pv = sorted(v for v in r.json().get("variables", {}) if v.startswith("POP"))
+                extra = f" POP vars: {pv}"
+            print(f"  {r.status_code}  {url}{extra}")
 
 
 def main():
