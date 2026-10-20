@@ -40,6 +40,8 @@
   #trend-count, #compare-note { font-size: 0.75rem; color: #9aa0a6; }
   .note { padding: 0.5rem 1.5rem 1.25rem; color: #9aa0a6; font-size: 0.8rem; }
   .chart { width: 100%; height: 360px; }
+  .blurb { margin: 0.5rem 0 0; color: #9aa0a6; font-size: 0.82rem; line-height: 1.4; max-width: 760px; }
+  .period-label { font-size: 0.95rem; color: #e6e6e6; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -52,16 +54,14 @@
 <section>
   <h2>Annual map</h2>
   <div class="controls">
-    <label>Year
-      <input id="map-year" type="range" min="1991" max="2026" value="2026" />
-      <span id="map-year-label">2026</span>
-    </label>
+    <span id="period-label" class="period-label"></span>
     <div class="metric-toggle" id="map-metric-toggle">
       <button data-metric="anomaly" class="active">Anomaly</button>
       <button data-metric="avg">Avg Temp</button>
     </div>
   </div>
   <div id="map-primary" class="map"></div>
+  <p class="blurb" id="map-primary-blurb"></p>
 </section>
 
 <section>
@@ -69,12 +69,17 @@
   <div class="controls">
     <label>Start <input id="compare-start" type="number" min="1991" max="2026" value="1991" /></label>
     <label>End <input id="compare-end" type="number" min="1991" max="2026" value="2026" /></label>
+    <div class="metric-toggle" id="compare-metric-toggle">
+      <button data-metric="anomaly" class="active">Anomaly</button>
+      <button data-metric="avg">Avg Temp</button>
+    </div>
     <span id="compare-note"></span>
   </div>
   <div class="compare-row">
     <div><div id="map-compare-start" class="map"></div></div>
     <div><div id="map-compare-end" class="map"></div></div>
   </div>
+  <p class="blurb" id="compare-blurb"></p>
 </section>
 
 <section>
@@ -133,14 +138,26 @@ const MONTHS = ["January","February","March","April","May","June","July","August
                 "September","October","November","December"];
 const TREND_COLORS = ["#4C9AFF", "#FF8A65", "#81C784", "#FFD54F", "#BA68C8"];
 
+// Explicit blue -> red scales (cold = blue, hot = red). The previous
+// built-in "RdBu" runs blue -> red in Plotly, and reversing it is what made
+// warmer states blue, so the colors are spelled out here instead.
+const SCALES = {
+  diverging: [[0, "#08519c"], [0.25, "#6baed6"], [0.5, "#f7f7f7"], [0.75, "#fb6a4a"], [1, "#a50f15"]],
+  temp:      [[0, "#08519c"], [0.25, "#6baed6"], [0.5, "#ffffbf"], [0.75, "#fd8d3c"], [1, "#a50f15"]],
+};
+
 const METRIC = {
-  anomaly: { field: "anomaly_f", colorscale: "RdBu", reversescale: true, zmin: -6, zmax: 6, zmid: 0,
+  anomaly: { field: "anomaly_f", scale: "diverging", zmin: -6, zmax: 6,
              title: "\u00b0F anomaly", axisTitle: "Anomaly (\u00b0F)" },
-  avg:     { field: "tavg_f", colorscale: "RdYlBu", reversescale: true, zmin: 30, zmax: 85, zmid: 57,
+  avg:     { field: "tavg_f", scale: "temp", zmin: 30, zmax: 85,
              title: "\u00b0F avg", axisTitle: "Avg temp (\u00b0F)" },
 };
 
+// Maps are locked: no drag, no scroll-zoom, no double-click zoom.
+const MAP_CONFIG = { responsive: true, displayModeBar: false, scrollZoom: false, doubleClick: false };
+
 const commonGeoLayout = () => ({
+  dragmode: false,
   geo: { scope: "usa", bgcolor: "rgba(0,0,0,0)", showland: false, showlakes: false,
          showsubunits: true, subunitcolor: "#333" },
   paper_bgcolor: "#0e1117",
@@ -174,37 +191,68 @@ function movingAverage(values, window = 5) {
   });
 }
 
-function makeMapTrace(states, metricKey) {
-  const m = METRIC[metricKey];
+const fmtF = (v, signed) =>
+  v == null ? "n/a" : `${signed && v > 0 ? "+" : ""}${v.toFixed(1)}\u00b0F`;
+
+function makeChoropleth({ locations, z, text, scale, zmin, zmax, title }) {
   return {
     type: "choropleth",
     locationmode: "USA-states",
-    locations: states.map(s => s.state_abbr),
-    z: states.map(s => s[m.field]),
-    text: states.map(s => `${s.state_abbr}: ${s[m.field] != null ? s[m.field].toFixed(1) : "n/a"}\u00b0F`),
+    locations, z, text,
     hoverinfo: "text",
-    colorscale: m.colorscale,
-    reversescale: m.reversescale,
-    zmin: m.zmin, zmax: m.zmax, zmid: m.zmid,
+    colorscale: scale,
+    zmin, zmax,
     marker: { line: { width: 0.5, color: "#333" } },
-    colorbar: { title: m.title },
+    colorbar: { title },
   };
 }
 
-// ---------- Primary map ----------
+function makeMapTrace(states, metricKey) {
+  const m = METRIC[metricKey];
+  return makeChoropleth({
+    locations: states.map(s => s.state_abbr),
+    z: states.map(s => s[m.field]),
+    text: states.map(s => `${s.state_abbr}: ${fmtF(s[m.field], metricKey === "anomaly")}`),
+    scale: SCALES[m.scale], zmin: m.zmin, zmax: m.zmax, title: m.title,
+  });
+}
+
+// ---------- Primary map (whole period, no year slider) ----------
 let mapMetric = "anomaly";
-const mapYearInput = document.getElementById("map-year");
-const mapYearLabel = document.getElementById("map-year-label");
+const periodLabel = document.getElementById("period-label");
+const primaryBlurb = document.getElementById("map-primary-blurb");
 
 async function renderPrimaryMap() {
-  const year = Number(mapYearInput.value);
-  mapYearLabel.textContent = year;
-  const resp = await fetch(`/api/states/map/${year}`);
-  const data = await resp.json();
-  Plotly.react("map-primary", [makeMapTrace(data.states, mapMetric)], commonGeoLayout(),
-               { responsive: true, displayModeBar: false });
+  const resp = await fetch("/api/states/period?start_year=1991");
+  const d = await resp.json();
+  const span = `${d.start_year}\u2013${d.end_year}`;
+  periodLabel.textContent = span;
+  let trace;
+  if (mapMetric === "anomaly") {
+    trace = makeChoropleth({
+      locations: d.states.map(s => s.state_abbr),
+      z: d.states.map(s => s.change_f),
+      text: d.states.map(s => `${s.state_abbr}: ${fmtF(s.change_f, true)} since ${d.start_year}`),
+      scale: SCALES.diverging, zmin: -4, zmax: 4, title: "\u00b0F change",
+    });
+    const partial = d.months_compared < 12
+      ? ` ${d.end_year} is only partly complete, so the same ${d.months_compared} months are compared in both years.` : "";
+    primaryBlurb.textContent =
+      `How much each state's temperature changed from ${d.start_year} to ${d.end_year}, in \u00b0F. ` +
+      `Red states are warmer now, blue states are cooler.${partial}`;
+  } else {
+    trace = makeChoropleth({
+      locations: d.states.map(s => s.state_abbr),
+      z: d.states.map(s => s.avg_tavg_f),
+      text: d.states.map(s => `${s.state_abbr}: ${fmtF(s.avg_tavg_f)} average`),
+      scale: SCALES.temp, zmin: 30, zmax: 85, title: "\u00b0F avg",
+    });
+    primaryBlurb.textContent =
+      `Each state's average temperature across all years from ${d.start_year} to ${d.end_year}. ` +
+      `Blue is cooler, red is hotter.`;
+  }
+  Plotly.react("map-primary", [trace], commonGeoLayout(), MAP_CONFIG);
 }
-mapYearInput.addEventListener("change", renderPrimaryMap);
 document.getElementById("map-metric-toggle").addEventListener("click", (e) => {
   if (!e.target.dataset.metric) return;
   mapMetric = e.target.dataset.metric;
@@ -216,24 +264,35 @@ document.getElementById("map-metric-toggle").addEventListener("click", (e) => {
 const compareStart = document.getElementById("compare-start");
 const compareEnd = document.getElementById("compare-end");
 const compareNote = document.getElementById("compare-note");
+const compareBlurb = document.getElementById("compare-blurb");
+let compareMetric = "anomaly";
 
 async function renderCompare() {
   const startYear = Number(compareStart.value);
   const endYear = Number(compareEnd.value);
   compareNote.textContent = "";
+  compareBlurb.textContent = compareMetric === "anomaly"
+    ? `Each map shows how far a state's temperature was from its normal (the 1991–2020 average) in that year. ` +
+      `Red means warmer than normal, blue means cooler than normal. Pick two years to see how the pattern shifted.`
+    : `Each map shows a state's average temperature in that year. Blue is cooler, red is hotter. ` +
+      `Pick two years to compare them side by side.`;
   if (startYear >= endYear) {
     compareNote.textContent = "Start year must be before end year.";
     return;
   }
   const resp = await fetch(`/api/states/compare?start_year=${startYear}&end_year=${endYear}`);
   const data = await resp.json();
-  Plotly.react("map-compare-start", [makeMapTrace(data.start, mapMetric)], commonGeoLayout(),
-               { responsive: true, displayModeBar: false });
-  Plotly.react("map-compare-end", [makeMapTrace(data.end, mapMetric)], commonGeoLayout(),
-               { responsive: true, displayModeBar: false });
+  Plotly.react("map-compare-start", [makeMapTrace(data.start, compareMetric)], commonGeoLayout(), MAP_CONFIG);
+  Plotly.react("map-compare-end", [makeMapTrace(data.end, compareMetric)], commonGeoLayout(), MAP_CONFIG);
 }
 compareStart.addEventListener("change", renderCompare);
 compareEnd.addEventListener("change", renderCompare);
+document.getElementById("compare-metric-toggle").addEventListener("click", (e) => {
+  if (!e.target.dataset.metric) return;
+  compareMetric = e.target.dataset.metric;
+  [...e.currentTarget.children].forEach(b => b.classList.toggle("active", b === e.target));
+  renderCompare();
+});
 
 // ---------- Trend (multi-state) ----------
 const pickerDiv = document.getElementById("trend-state-picker");

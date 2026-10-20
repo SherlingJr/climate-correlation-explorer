@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 from db import get_cursor
@@ -55,6 +57,61 @@ def compare_years(start_year: int, end_year: int):
         "start": by_year.get(start_year, []),
         "end": by_year.get(end_year, []),
     }
+
+
+@router.get("/states/period")
+def period_summary(start_year: int = 1991, end_year: Optional[int] = None):
+    """Whole-period view that powers the annual map (no year slider):
+      - change_f:   how much each state warmed/cooled from start_year to
+                    end_year (end_year defaults to the latest year loaded).
+                    Only the months present in end_year are compared in BOTH
+                    years, so a partial current year isn't compared against a
+                    full 1991 (that would fake a seasonal difference).
+      - avg_tavg_f: average temperature across every year in the range."""
+    with get_cursor() as cur:
+        if end_year is None:
+            cur.execute("select max(period_year) from analytics_marts.mart_state_climate_monthly")
+            end_year = cur.fetchone()[0]
+        cur.execute(
+            "select max(period_month) from analytics_marts.mart_state_climate_monthly where period_year = %s",
+            (end_year,),
+        )
+        months = cur.fetchone()[0]
+        if end_year is None or months is None:
+            raise HTTPException(status_code=404, detail=f"No data for {end_year}")
+
+        cur.execute(
+            """
+            select state_abbr, period_year, avg(anomaly_f)
+            from analytics_marts.mart_state_climate_monthly
+            where period_year in (%s, %s) and period_month <= %s
+            group by state_abbr, period_year
+            """,
+            (start_year, end_year, months),
+        )
+        anomaly = {(a, y): v for a, y, v in cur.fetchall()}
+
+        cur.execute(
+            """
+            select state_abbr, avg(tavg_f)
+            from analytics_marts.mart_state_climate_monthly
+            where period_year between %s and %s
+            group by state_abbr
+            """,
+            (start_year, end_year),
+        )
+        avg_temp = dict(cur.fetchall())
+
+    states = []
+    for abbr, avg in avg_temp.items():
+        a0, a1 = anomaly.get((abbr, start_year)), anomaly.get((abbr, end_year))
+        states.append({
+            "state_abbr": abbr,
+            "change_f": float(a1 - a0) if a0 is not None and a1 is not None else None,
+            "avg_tavg_f": float(avg) if avg is not None else None,
+        })
+    return {"start_year": start_year, "end_year": end_year,
+            "months_compared": months, "states": states}
 
 
 @router.get("/states/{state}/trend")
