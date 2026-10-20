@@ -16,5 +16,8 @@ select
     population::numeric         as value
 from {{ ref('stg_census_population') }}
 
--- union all
--- select 'bls_unemployment', ... from {{ ref('stg_bls_unemployment') }}
+-- To add an overlay, append a branch like:
+--   union all
+--   select 'bls_unemployment'::text, state_fips, state_abbr, period_year, value
+--   from <ref to the new staging model>
+-- NOTE: never put curly-brace Jinja in a SQL comment - dbt renders it anyway.
