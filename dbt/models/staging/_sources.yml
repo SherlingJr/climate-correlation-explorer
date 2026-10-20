@@ -16,6 +16,18 @@ sources:
           - name: period_month
             tests:
               - not_null
+      - name: census_population_annual
+        description: July 1 state population estimates 2010-present from the Census Population Estimates Program, loaded by ingest_census_population.py.
+        columns:
+          - name: state_fips
+            tests:
+              - not_null
+          - name: period_year
+            tests:
+              - not_null
+          - name: population
+            tests:
+              - not_null
       # noaa_county_climate_monthly and county_fips_reference intentionally
       # omitted here - the county pipeline is retired (see sql/schema_raw.sql
       # note). The tables still exist in Postgres, just unused by dbt now.
@@ -56,5 +68,23 @@ models:
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
+            - state_fips
+            - period_year
+
+  - name: stg_census_population
+    columns:
+      - name: state_fips
+        tests:
+          - not_null
+
+  - name: mart_overlay_annual
+    columns:
+      - name: value
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - dataset
             - state_fips
             - period_year

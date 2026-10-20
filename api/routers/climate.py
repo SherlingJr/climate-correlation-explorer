@@ -134,27 +134,63 @@ def state_month_drilldown(state: str, month: int):
     return {"state": state.upper(), "month": month, "series": [dict(zip(MONTHLY_COLS, r)) for r in rows]}
 
 
+# Overlay registry. To add a dataset: add a union branch in
+# dbt/models/marts/mart_overlay_annual.sql, then flip its status to "live"
+# here. The frontend selector reads /available_overlays, so listing it needs
+# no frontend change (display rules live in index.html OVERLAYS).
+OVERLAYS = {
+    "census_population": {"label": "Population", "unit": "people", "status": "live"},
+    "bls_unemployment": {"label": "Unemployment rate", "unit": "%", "status": "planned"},
+    "usda_crop_yields": {"label": "Crop yields", "status": "planned"},
+    "fbi_crime": {"label": "Crime rate", "status": "planned"},
+    "cdc_mortality": {"label": "Mortality rate", "status": "planned"},
+}
+
+
 @router.get("/available_overlays")
 def available_overlays():
-    """Stub for Phase 2+ - only climate is live right now. The frontend
-    overlay selector reads this list so adding USDA/CDC/FBI later doesn't
-    require a frontend code change, just a new entry here."""
-    return {
-        "overlays": [
-            {"id": "climate", "label": "Temperature anomaly", "status": "live"},
-            {"id": "usda_crop_yields", "label": "Crop yields", "status": "planned"},
-            {"id": "cdc_mortality", "label": "Mortality rate", "status": "planned"},
-            {"id": "fbi_crime", "label": "Crime rate", "status": "planned"},
-        ]
-    }
+    """Overlay list for the frontend selector. Only 'live' ones are usable."""
+    return {"overlays": [{"id": k, **v} for k, v in OVERLAYS.items()]}
 
 
-@router.get("/overlay/{dataset}/{state}")
-def overlay_series(dataset: str, state: str, start_year: int = 1991, end_year: int = 2026):
-    """Placeholder until Phase 2/3 land their marts - returns 501 rather
-    than a fake 200 so the frontend can distinguish 'not built yet' from
-    'no data for this state'."""
-    raise HTTPException(status_code=501, detail=f"Overlay '{dataset}' not implemented yet")
+@router.get("/overlay/{dataset}")
+def overlay_series(dataset: str, states: str, start_year: int = 1991, end_year: int = 2026):
+    """Annual overlay series for up to 5 states in ONE call, same shape as
+    /states/trend. 501 for datasets not built yet, so the frontend can tell
+    'not built yet' from 'no data for this state'. Overlays can start later
+    than the climate record (population starts in 2010) - the series is
+    simply shorter, never padded."""
+    meta = OVERLAYS.get(dataset)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Unknown overlay '{dataset}'")
+    if meta["status"] != "live":
+        raise HTTPException(status_code=501, detail=f"Overlay '{dataset}' not implemented yet")
+
+    abbrs = [s.strip().upper() for s in states.split(",") if s.strip()]
+    if not abbrs:
+        raise HTTPException(status_code=422, detail="states must be a non-empty comma-separated list")
+    if len(abbrs) > 5:
+        raise HTTPException(status_code=422, detail="up to 5 states at a time")
+
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            select state_abbr, period_year, value
+            from analytics_marts.mart_overlay_annual
+            where dataset = %s
+              and state_abbr = any(%s)
+              and period_year between %s and %s
+            order by state_abbr, period_year
+            """,
+            (dataset, abbrs, start_year, end_year),
+        )
+        rows = cur.fetchall()
+
+    series: dict[str, list[dict]] = {a: [] for a in abbrs}
+    for abbr, year, value in rows:
+        series.setdefault(abbr, []).append({"period_year": year, "value": float(value)})
+    return {"dataset": dataset, "label": meta["label"], "unit": meta.get("unit"),
+            "states": abbrs, "series": series}
 
 
 @router.get("/correlation/{dataset_a}/{dataset_b}")

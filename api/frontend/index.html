@@ -86,11 +86,14 @@
       <button data-metric="anomaly" class="active">Anomaly</button>
       <button data-metric="avg">Avg Temp</button>
     </div>
+    <label>Overlay
+      <select id="trend-overlay"><option value="">None</option></select>
+    </label>
     <span id="trend-count">0 / 5 states selected</span>
   </div>
   <div class="state-picker" id="trend-state-picker"></div>
   <div id="chart-trend" class="chart"></div>
-  <p class="note" style="padding:0.25rem 0 0;">Lines show a 5-year moving average (smooths out single hot/cold years so the underlying trend reads clearly).</p>
+  <p class="note" style="padding:0.25rem 0 0;">Solid lines show temperature as a 5-year moving average (smooths out single hot/cold years so the underlying trend reads clearly). Dashed lines (right axis) show the selected overlay, as % change since the first year shown. Overlays may start later than 1991.</p>
 </section>
 
 <section>
@@ -109,8 +112,8 @@
 
 <p class="note">
   Correlation &ne; causation. Coverage: contiguous 48 states (NOAA's source data does not
-  include Alaska, Hawaii, or the territories). Overlay datasets (crop yields, mortality,
-  crime) will appear here once Phase 2/3 land.
+  include Alaska, Hawaii, or the territories). Overlay datasets are being added one at a time
+  (population is live; unemployment, crop yields, crime, and mortality are next).
 </p>
 
 <script>
@@ -259,6 +262,35 @@ function enforceTrendLimit(e) {
 }
 pickerDiv.addEventListener("change", (e) => { enforceTrendLimit(e); renderTrend(); });
 
+// Display rules per overlay dataset. "pct_from_start" rebases each state to
+// % change since its first year in the selected range, so a 39M-person state
+// and a 0.6M-person state can share one axis. Add an entry per new overlay.
+const OVERLAYS = {
+  census_population: { transform: "pct_from_start", axisTitle: "Population (% change since first year)" },
+};
+const trendOverlaySelect = document.getElementById("trend-overlay");
+
+async function loadOverlayOptions() {
+  try {
+    const resp = await fetch("/api/available_overlays");
+    const data = await resp.json();
+    data.overlays.filter(o => o.status === "live" && OVERLAYS[o.id]).forEach(o => {
+      const opt = document.createElement("option");
+      opt.value = o.id; opt.textContent = o.label;
+      trendOverlaySelect.appendChild(opt);
+    });
+  } catch (e) { /* overlay list is optional; chart works without it */ }
+}
+trendOverlaySelect.addEventListener("change", renderTrend);
+
+function applyOverlayTransform(kind, values) {
+  if (kind === "pct_from_start") {
+    const base = values[0];
+    return values.map(v => (base ? (v / base - 1) * 100 : null));
+  }
+  return values;
+}
+
 async function renderTrend() {
   const states = selectedTrendStates();
   if (states.length === 0) {
@@ -267,8 +299,17 @@ async function renderTrend() {
   }
   const startYear = Number(document.getElementById("trend-start").value);
   const endYear = Number(document.getElementById("trend-end").value);
-  const resp = await fetch(`/api/states/trend?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`);
-  const data = await resp.json();
+  const overlayId = trendOverlaySelect.value;
+  const climateReq = fetch(`/api/states/trend?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`);
+  const overlayReq = overlayId
+    ? fetch(`/api/overlay/${overlayId}?states=${states.join(",")}&start_year=${startYear}&end_year=${endYear}`)
+    : null;
+  const data = await (await climateReq).json();
+  let overlayData = null;
+  if (overlayReq) {
+    const oresp = await overlayReq;
+    if (oresp.ok) overlayData = await oresp.json();
+  }
   const field = METRIC[trendMetric].field;
   const traces = states.map((abbr, i) => {
     const series = data.series[abbr] || [];
@@ -282,8 +323,24 @@ async function renderTrend() {
       line: { color, width: 3 },
     };
   });
-  Plotly.react("chart-trend", traces, chartLayoutBase(METRIC[trendMetric].axisTitle),
-               { responsive: true, displayModeBar: false });
+  const layout = chartLayoutBase(METRIC[trendMetric].axisTitle);
+  if (overlayData) {
+    const cfg = OVERLAYS[overlayId];
+    states.forEach((abbr, i) => {
+      const series = overlayData.series[abbr] || [];
+      if (!series.length) return;
+      traces.push({
+        type: "scatter", mode: "lines", name: `${abbr} ${overlayData.label}`,
+        x: series.map(r => r.period_year),
+        y: applyOverlayTransform(cfg.transform, series.map(r => r.value)),
+        yaxis: "y2",
+        line: { color: TREND_COLORS[i % TREND_COLORS.length], width: 2, dash: "dash" },
+      });
+    });
+    layout.yaxis2 = { title: cfg.axisTitle, overlaying: "y", side: "right", showgrid: false };
+    layout.margin = { ...layout.margin, r: 60 };
+  }
+  Plotly.react("chart-trend", traces, layout, { responsive: true, displayModeBar: false });
 }
 document.getElementById("trend-start").addEventListener("change", renderTrend);
 document.getElementById("trend-end").addEventListener("change", renderTrend);
@@ -332,6 +389,7 @@ renderPrimaryMap();
 renderCompare();
 renderTrend();
 renderDrilldown();
+loadOverlayOptions();
 
 // ---------- WordPress iframe auto-resize ----------
 function reportHeight() {
